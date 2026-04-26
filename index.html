@@ -20,25 +20,18 @@ input { font-family: inherit; }
 </head>
 <body>
 <div id="root"></div>
-
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
 <script>
-const {useState,useEffect,useRef,useCallback,useMemo} = React;
+const {useState,useEffect,useRef,useCallback} = React;
 
 const DEFAULT_CATS=[
-  {n:"Supermercado",i:"🛒",c:"#16a34a"},
-  {n:"Hortifruti",i:"🥦",c:"#65a30d"},
-  {n:"Farmácia",i:"💊",c:"#d97706"},
-  {n:"Restaurante",i:"🍽️",c:"#dc2626"},
-  {n:"Lazer",i:"🎯",c:"#7c3aed"},
-  {n:"Transporte",i:"🚗",c:"#2563eb"},
-  {n:"Contas",i:"📄",c:"#475569"},
-  {n:"Saúde",i:"🏥",c:"#db2777"},
-  {n:"Educação",i:"📚",c:"#ea580c"},
-  {n:"Outros",i:"📦",c:"#94a3b8"},
+  {n:"Supermercado",i:"🛒",c:"#16a34a"},{n:"Hortifruti",i:"🥦",c:"#65a30d"},
+  {n:"Farmácia",i:"💊",c:"#d97706"},{n:"Restaurante",i:"🍽️",c:"#dc2626"},
+  {n:"Lazer",i:"🎯",c:"#7c3aed"},{n:"Transporte",i:"🚗",c:"#2563eb"},
+  {n:"Contas",i:"📄",c:"#475569"},{n:"Saúde",i:"🏥",c:"#db2777"},
+  {n:"Educação",i:"📚",c:"#ea580c"},{n:"Outros",i:"📦",c:"#94a3b8"},
 ];
-
 const COLOR_PALETTE=["#16a34a","#65a30d","#0891b2","#2563eb","#7c3aed","#db2777","#dc2626","#ea580c","#d97706","#475569"];
 
 const ld=(k,d)=>{try{return JSON.parse(localStorage.getItem(k))??d;}catch{return d;}};
@@ -47,6 +40,7 @@ const brl=n=>`R$ ${(+(n)||0).toFixed(2).replace(".",",")}`;
 const dtBR=d=>d?new Date(d+"T12:00").toLocaleDateString("pt-BR"):"";
 const today=()=>new Date().toISOString().split("T")[0];
 const getCat=(cats,name)=>cats.find(c=>c.n===name)||{n:name||"?",i:"📦",c:"#94a3b8"};
+const effectiveSplit=(e)=>(e.splitWith&&e.splitWith.length>0)?e.splitWith:[e.payer].filter(Boolean);
 
 async function compress(file){
   return new Promise(res=>{
@@ -84,14 +78,10 @@ async function callClaude(b64,lmap,cats,apiKey){
   const res=await fetch("https://api.anthropic.com/v1/messages",{
     method:"POST",
     headers:{"Content-Type":"application/json","x-api-key":apiKey,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
-    body:JSON.stringify({
-      model:"claude-sonnet-4-20250514",
-      max_tokens:800,
-      messages:[{role:"user",content:[
-        {type:"image",source:{type:"base64",media_type:"image/jpeg",data:b64}},
-        {type:"text",text:`Analise o comprovante e retorne APENAS JSON:\n{"merchant":"nome","total":0.00,"date":"YYYY-MM-DD","category":"cat","items":[]}\n\nCategorias: ${cats.map(c=>c.n).join(", ")}\n${hints?`\nAprendizado: ${hints}`:""}`}
-      ]}]
-    })
+    body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:800,messages:[{role:"user",content:[
+      {type:"image",source:{type:"base64",media_type:"image/jpeg",data:b64}},
+      {type:"text",text:`Analise o comprovante e retorne APENAS JSON:\n{"merchant":"nome","total":0.00,"date":"YYYY-MM-DD","category":"cat","items":[]}\n\nCategorias: ${cats.map(c=>c.n).join(", ")}\n${hints?`\nAprendizado: ${hints}`:""}`}
+    ]}]})
   });
   if(!res.ok){const e=await res.text();throw new Error("API "+res.status+": "+e.slice(0,150));}
   const d=await res.json();
@@ -104,11 +94,7 @@ async function suggestEmojis(name,apiKey){
   const res=await fetch("https://api.anthropic.com/v1/messages",{
     method:"POST",
     headers:{"Content-Type":"application/json","x-api-key":apiKey,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
-    body:JSON.stringify({
-      model:"claude-haiku-4-5-20251001",
-      max_tokens:100,
-      messages:[{role:"user",content:`Sugira 3 emojis adequados para representar a categoria de gastos "${name}" em um app financeiro. Retorne APENAS um array JSON com 3 emojis distintos: ["X","Y","Z"]`}]
-    })
+    body:JSON.stringify({model:"claude-haiku-4-5-20251001",max_tokens:100,messages:[{role:"user",content:`Sugira 3 emojis para a categoria "${name}" em app financeiro. Retorne APENAS array JSON: ["X","Y","Z"]`}]})
   });
   if(!res.ok)throw new Error("API "+res.status);
   const d=await res.json();
@@ -122,13 +108,17 @@ const Card=({title,children,style={}})=>React.createElement("div",{style:{backgr
 
 const ExpRow=({e,cats})=>{
   const cat=getCat(cats,e.category);
+  const split=effectiveSplit(e);
   return React.createElement("div",{style:{display:"flex",alignItems:"center",gap:12,padding:"11px 0",borderBottom:"1px solid #f0ede6"}},
     React.createElement("div",{style:{width:40,height:40,borderRadius:13,background:cat.c+"20",display:"flex",alignItems:"center",justifyContent:"center",fontSize:18,flexShrink:0}},cat.i),
     React.createElement("div",{style:{flex:1,minWidth:0}},
       React.createElement("div",{style:{fontWeight:600,fontSize:13,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}},e.merchant||"Sem nome"),
-      React.createElement("div",{style:{fontSize:11,color:"#6b7280"}},`${dtBR(e.date)} · ${e.payer}${e.driveUrl?" · 📎":""}`)
+      React.createElement("div",{style:{fontSize:11,color:"#6b7280"}},`${dtBR(e.date)} · ${e.payer}${split.length>1?` · ÷${split.length}`:""}${e.driveUrl?" · 📎":""}`)
     ),
-    React.createElement("div",{style:{fontWeight:700,fontSize:14,flexShrink:0}},brl(e.total))
+    React.createElement("div",{style:{fontWeight:700,fontSize:14,flexShrink:0,textAlign:"right"}},
+      React.createElement("div",null,brl(e.total)),
+      split.length>1&&React.createElement("div",{style:{fontSize:10,color:"#9ca3af",fontWeight:500}},brl(e.total/split.length)+"/pessoa")
+    )
   );
 };
 
@@ -138,10 +128,7 @@ const InputEl=({value,onChange,...props})=>React.createElement("input",{value,on
 const Spinner=({size=20,color="#fff"})=>React.createElement("div",{className:"spin",style:{width:size,height:size,border:`2.5px solid ${color}30`,borderTopColor:color,borderRadius:"50%",flexShrink:0}});
 const Header=({title,onBack,right})=>React.createElement("div",{style:{background:"linear-gradient(135deg,#1a3a2a,#2d5a3d)",padding:"20px 16px 22px",borderRadius:"0 0 28px 28px",marginBottom:4}},
   React.createElement("div",{style:{display:"flex",alignItems:"center",justifyContent:"space-between"}},
-    React.createElement("div",{style:{display:"flex",alignItems:"center",gap:12}},
-      React.createElement(BackBtn,{onClick:onBack}),
-      React.createElement("span",{style:{color:"#fff",fontWeight:700,fontSize:18,fontFamily:"Fraunces"}},title)
-    ),right
+    React.createElement("div",{style:{display:"flex",alignItems:"center",gap:12}},React.createElement(BackBtn,{onClick:onBack}),React.createElement("span",{style:{color:"#fff",fontWeight:700,fontSize:18,fontFamily:"Fraunces"}},title)),right
   )
 );
 
@@ -178,8 +165,24 @@ function CaptureView({payers,lmap,cats,apiKey,onSave,onBack,toast_}){
   const [b64,setB64]=useState(null);
   const [result,setResult]=useState({merchant:"",total:"",date:today(),category:"Outros",items:[]});
   const [payer,setPayer]=useState(payers[0]||"Eu");
+  const [splitWith,setSplitWith]=useState([...payers]);
   const fileRef=useRef();
   const set=(k,v)=>setResult(p=>({...p,[k]:v}));
+
+  // Garantir que pagador esteja sempre incluído no rateio
+  useEffect(()=>{
+    if(payer&&!splitWith.includes(payer))setSplitWith(p=>[...p,payer]);
+  },[payer]);
+
+  const toggleAll=()=>{
+    if(splitWith.length===payers.length)setSplitWith([payer]);
+    else setSplitWith([...payers]);
+  };
+  const togglePerson=(p)=>{
+    if(p===payer){toast_("Pagador sempre faz parte","err");return;}
+    if(splitWith.includes(p))setSplitWith(splitWith.filter(x=>x!==p));
+    else setSplitWith([...splitWith,p]);
+  };
 
   const handleFile=async(file)=>{
     if(!file)return;
@@ -198,9 +201,12 @@ function CaptureView({payers,lmap,cats,apiKey,onSave,onBack,toast_}){
   const handleSave=async()=>{
     const v=parseFloat((result.total||"0").replace(",","."));
     if(!v){toast_("Informe o valor","err");return;}
+    if(splitWith.length===0){toast_("Selecione pelo menos uma pessoa para o rateio","err");return;}
     setStage("saving");
-    await onSave({...result,total:v,payer,imageBase64:b64});
+    await onSave({...result,total:v,payer,splitWith,imageBase64:b64});
   };
+
+  const valorPorPessoa=parseFloat((result.total||"0").replace(",","."))/Math.max(1,splitWith.length);
 
   if(stage==="pick")return React.createElement(Wrap,{pb:20},
     React.createElement(Header,{title:"Novo gasto",onBack}),
@@ -257,9 +263,29 @@ function CaptureView({payers,lmap,cats,apiKey,onSave,onBack,toast_}){
           ))
         )
       ),
-      React.createElement(Card,{title:"Quem pagou?"},
+      React.createElement(Card,{title:"💳 Quem pagou?"},
         React.createElement("div",{style:{display:"flex",gap:8,flexWrap:"wrap"}},
           payers.map(p=>React.createElement("button",{key:p,onClick:()=>setPayer(p),style:{padding:"8px 18px",borderRadius:24,border:"2px solid",borderColor:payer===p?"#1a3a2a":"#e5e7eb",background:payer===p?"#1a3a2a":"#fff",color:payer===p?"#fff":"#374151",fontWeight:600,fontSize:14}},p))
+        )
+      ),
+      React.createElement(Card,{title:"🤝 Dividir entre quem?"},
+        React.createElement("button",{onClick:toggleAll,style:{width:"100%",padding:10,borderRadius:12,border:"none",background:splitWith.length===payers.length?"#1a3a2a":"#f3f4f6",color:splitWith.length===payers.length?"#fff":"#374151",fontWeight:700,fontSize:13,marginBottom:10}},
+          splitWith.length===payers.length?"✓ Todos selecionados":"+ Marcar todos"
+        ),
+        React.createElement("div",{style:{display:"flex",gap:8,flexWrap:"wrap"}},
+          payers.map(p=>{
+            const sel=splitWith.includes(p);
+            const isPayer=p===payer;
+            return React.createElement("button",{key:p,onClick:()=>togglePerson(p),style:{padding:"8px 14px",borderRadius:24,border:"2px solid",borderColor:sel?"#2d5a3d":"#e5e7eb",background:sel?"#2d5a3d":"#fff",color:sel?"#fff":"#374151",fontWeight:600,fontSize:13,display:"flex",alignItems:"center",gap:5,opacity:isPayer?0.85:1}},
+              sel&&React.createElement("span",null,"✓"),p,isPayer&&React.createElement("span",{style:{fontSize:9,opacity:.8}},"💳")
+            );
+          })
+        ),
+        splitWith.length>1&&result.total&&React.createElement("div",{style:{marginTop:12,padding:10,background:"#f0fdf4",border:"1.5px solid #16a34a40",borderRadius:12,fontSize:13,color:"#166534",textAlign:"center",fontWeight:600}},
+          `${brl(valorPorPessoa)} por pessoa (${splitWith.length} pessoas)`
+        ),
+        splitWith.length===1&&React.createElement("div",{style:{marginTop:12,padding:10,background:"#f3f4f6",borderRadius:12,fontSize:12,color:"#6b7280",textAlign:"center"}},
+          "Sem rateio — só "+payer
         )
       ),
       React.createElement("button",{onClick:handleSave,style:{width:"100%",padding:16,borderRadius:16,border:"none",background:"linear-gradient(135deg,#1a3a2a,#2d5a3d)",color:"#fff",fontSize:16,fontWeight:700}},"💾 Salvar gasto")
@@ -310,58 +336,47 @@ function CategoryEditor({apiKey,cats,onAdd,onCancel,toast_}){
   const [customIcon,setCustomIcon]=useState("");
 
   const fetchIcons=async()=>{
-    if(!name.trim()){toast_("Digite o nome da categoria","err");return;}
-    if(!apiKey){toast_("Configure a chave em ⚙️ primeiro","err");return;}
+    if(!name.trim()){toast_("Digite o nome","err");return;}
+    if(!apiKey){toast_("Configure a chave em ⚙️","err");return;}
     setLoading(true);
-    try{
-      const emojis=await suggestEmojis(name.trim(),apiKey);
-      setIcons(emojis);
-      setSelectedIcon(emojis[0]||"📦");
-    }catch(err){
-      toast_("⚠️ "+err.message,"err");
-      setIcons(["📦","🎯","⭐"]);
-      setSelectedIcon("📦");
-    }finally{setLoading(false);}
+    try{const emojis=await suggestEmojis(name.trim(),apiKey);setIcons(emojis);setSelectedIcon(emojis[0]||"📦");}
+    catch(err){toast_("⚠️ "+err.message,"err");setIcons(["📦","🎯","⭐"]);setSelectedIcon("📦");}
+    finally{setLoading(false);}
   };
 
   const handleAdd=()=>{
     const finalIcon=customIcon.trim()||selectedIcon;
     if(!name.trim()){toast_("Digite o nome","err");return;}
     if(!finalIcon){toast_("Escolha um ícone","err");return;}
-    if(cats.find(c=>c.n===name.trim())){toast_("Já existe uma categoria com esse nome","err");return;}
+    if(cats.find(c=>c.n===name.trim())){toast_("Já existe","err");return;}
     onAdd({n:name.trim(),i:finalIcon,c:color});
   };
 
   return React.createElement(Card,{title:"➕ Nova categoria"},
-    React.createElement(Label,null,"Nome da categoria"),
+    React.createElement(Label,null,"Nome"),
     React.createElement("div",{style:{display:"flex",gap:8}},
-      React.createElement(InputEl,{value:name,onChange:setName,placeholder:"Ex: Pet, Viagem, Salão..."}),
-      React.createElement("button",{onClick:fetchIcons,disabled:loading||!name.trim(),style:{padding:"10px 14px",borderRadius:12,background:loading?"#9ca3af":"#7c3aed",color:"#fff",border:"none",fontWeight:700,fontSize:12,whiteSpace:"nowrap",display:"flex",alignItems:"center",gap:6}},
-        loading&&React.createElement(Spinner,{size:12}),loading?"...":"🤖 Ícones"
-      )
+      React.createElement(InputEl,{value:name,onChange:setName,placeholder:"Ex: Pet, Viagem..."}),
+      React.createElement("button",{onClick:fetchIcons,disabled:loading||!name.trim(),style:{padding:"10px 14px",borderRadius:12,background:loading?"#9ca3af":"#7c3aed",color:"#fff",border:"none",fontWeight:700,fontSize:12,whiteSpace:"nowrap",display:"flex",alignItems:"center",gap:6}},loading&&React.createElement(Spinner,{size:12}),loading?"...":"🤖 Ícones")
     ),
     icons.length>0&&React.createElement("div",null,
-      React.createElement(Label,null,"Sugestões da IA — toque para escolher"),
+      React.createElement(Label,null,"Sugestões da IA"),
       React.createElement("div",{style:{display:"flex",gap:8}},
         icons.map((emo,idx)=>React.createElement("button",{key:idx,onClick:()=>{setSelectedIcon(emo);setCustomIcon("");},style:{flex:1,padding:14,borderRadius:14,border:"2px solid",borderColor:selectedIcon===emo&&!customIcon?color:"#e5e7eb",background:selectedIcon===emo&&!customIcon?color+"18":"#fff",fontSize:32}},emo))
       )
     ),
-    React.createElement(Label,null,"Ou digite seu próprio ícone (emoji)"),
+    React.createElement(Label,null,"Ou digite seu próprio ícone"),
     React.createElement(InputEl,{value:customIcon,onChange:setCustomIcon,placeholder:"📦",maxLength:4}),
     React.createElement(Label,null,"Cor"),
     React.createElement("div",{style:{display:"flex",gap:6,flexWrap:"wrap"}},
-      COLOR_PALETTE.map(col=>React.createElement("button",{key:col,onClick:()=>setColor(col),style:{width:36,height:36,borderRadius:"50%",background:col,border:color===col?"3px solid #1a1a1a":"3px solid transparent",cursor:"pointer"}}))
+      COLOR_PALETTE.map(col=>React.createElement("button",{key:col,onClick:()=>setColor(col),style:{width:36,height:36,borderRadius:"50%",background:col,border:color===col?"3px solid #1a1a1a":"3px solid transparent"}}))
     ),
     React.createElement("div",{style:{marginTop:14,padding:14,borderRadius:14,background:"#f9f9f9",display:"flex",alignItems:"center",gap:12}},
       React.createElement("div",{style:{width:48,height:48,borderRadius:14,background:color+"20",display:"flex",alignItems:"center",justifyContent:"center",fontSize:24}},customIcon||selectedIcon||"❓"),
-      React.createElement("div",null,
-        React.createElement("div",{style:{fontSize:11,color:"#6b7280"}},"Pré-visualização"),
-        React.createElement("div",{style:{fontWeight:700,color}},name||"Nome da categoria")
-      )
+      React.createElement("div",null,React.createElement("div",{style:{fontSize:11,color:"#6b7280"}},"Pré-visualização"),React.createElement("div",{style:{fontWeight:700,color}},name||"Nome"))
     ),
     React.createElement("div",{style:{display:"flex",gap:8,marginTop:14}},
       React.createElement("button",{onClick:onCancel,style:{flex:1,padding:12,borderRadius:12,background:"#f3f4f6",color:"#374151",border:"none",fontWeight:700,fontSize:14}},"Cancelar"),
-      React.createElement("button",{onClick:handleAdd,style:{flex:2,padding:12,borderRadius:12,background:"linear-gradient(135deg,#1a3a2a,#2d5a3d)",color:"#fff",border:"none",fontWeight:700,fontSize:14}},"✓ Adicionar categoria")
+      React.createElement("button",{onClick:handleAdd,style:{flex:2,padding:12,borderRadius:12,background:"linear-gradient(135deg,#1a3a2a,#2d5a3d)",color:"#fff",border:"none",fontWeight:700,fontSize:14}},"✓ Adicionar")
     )
   );
 }
@@ -376,31 +391,29 @@ function SettingsView({payers,cfg,lmap,cats,apiKey,setApiKey,onAddPayer,onDelete
     React.createElement(Header,{title:"Configurações",onBack}),
     React.createElement("div",{style:{padding:16}},
       React.createElement(Card,{title:"🤖 Chave da Anthropic (IA)"},
-        React.createElement("div",{style:{fontSize:12,color:"#6b7280",marginBottom:10,lineHeight:1.5}},"Cole sua chave para usar IA. Começa com sk-ant-..."),
+        React.createElement("div",{style:{fontSize:12,color:"#6b7280",marginBottom:10}},"Cole sua chave para usar IA. Começa com sk-ant-..."),
         React.createElement("div",{style:{display:"flex",gap:6}},
           React.createElement(InputEl,{value:keyInput,onChange:setKeyInput,placeholder:"sk-ant-...",type:showKey?"text":"password"}),
           React.createElement("button",{onClick:()=>setShowKey(!showKey),style:{padding:"0 10px",borderRadius:12,background:"#f3f4f6",border:"none",fontSize:16}},showKey?"🙈":"👁️")
         ),
-        React.createElement("button",{onClick:()=>{setApiKey(keyInput.trim());toast_(keyInput.trim()?"✅ Chave salva!":"Chave removida");},style:{marginTop:10,padding:"10px 16px",borderRadius:12,background:"#1a3a2a",color:"#fff",border:"none",fontWeight:700,fontSize:13}},"Salvar chave"),
+        React.createElement("button",{onClick:()=>{setApiKey(keyInput.trim());toast_(keyInput.trim()?"✅ Chave salva!":"Chave removida");},style:{marginTop:10,padding:"10px 16px",borderRadius:12,background:"#1a3a2a",color:"#fff",border:"none",fontWeight:700,fontSize:13}},"Salvar"),
         apiKey&&React.createElement("div",{style:{marginTop:8,fontSize:11,color:"#16a34a"}},"✅ Configurada (...",apiKey.slice(-8),")")
       ),
       React.createElement(Card,{title:"🔄 Sincronização"},
-        React.createElement("button",{onClick:onRefresh,disabled:syncing,style:{width:"100%",padding:12,borderRadius:12,background:syncing?"#e5e7eb":"#1a3a2a",color:syncing?"#6b7280":"#fff",border:"none",fontWeight:700,fontSize:14,display:"flex",alignItems:"center",justifyContent:"center",gap:8}},
-          syncing&&React.createElement(Spinner,{size:14,color:"#6b7280"}),syncing?"Sincronizando...":"🔄 Atualizar agora"
-        )
+        React.createElement("button",{onClick:onRefresh,disabled:syncing,style:{width:"100%",padding:12,borderRadius:12,background:syncing?"#e5e7eb":"#1a3a2a",color:syncing?"#6b7280":"#fff",border:"none",fontWeight:700,fontSize:14,display:"flex",alignItems:"center",justifyContent:"center",gap:8}},syncing&&React.createElement(Spinner,{size:14,color:"#6b7280"}),syncing?"Sincronizando...":"🔄 Atualizar agora")
       ),
       React.createElement(Card,{title:`🏷️ Categorias (${cats.length})`},
         React.createElement("div",{style:{maxHeight:280,overflowY:"auto",marginBottom:12}},
           cats.map(cat=>React.createElement("div",{key:cat.n,style:{display:"flex",alignItems:"center",gap:10,padding:"8px 0",borderBottom:"1px solid #f0ede6"}},
             React.createElement("div",{style:{width:36,height:36,borderRadius:12,background:cat.c+"20",display:"flex",alignItems:"center",justifyContent:"center",fontSize:18,flexShrink:0}},cat.i),
             React.createElement("div",{style:{flex:1,fontWeight:600,fontSize:13}},cat.n),
-            React.createElement("button",{onClick:()=>{if(confirm(`Excluir categoria "${cat.n}"?`))onDeleteCategory(cat.n);},style:{background:"none",border:"none",fontSize:16,padding:4}},"🗑️")
+            React.createElement("button",{onClick:()=>{if(confirm(`Excluir "${cat.n}"?`))onDeleteCategory(cat.n);},style:{background:"none",border:"none",fontSize:16,padding:4}},"🗑️")
           ))
         ),
         !editingCategory&&React.createElement("button",{onClick:()=>setEditingCategory(true),style:{width:"100%",padding:12,borderRadius:12,background:"#fff",border:"2px dashed #2d5a3d",color:"#1a3a2a",fontWeight:700,fontSize:14}},"+ Nova categoria"),
         editingCategory&&React.createElement(CategoryEditor,{apiKey,cats,onAdd:cat=>{onAddCategory(cat);setEditingCategory(false);},onCancel:()=>setEditingCategory(false),toast_})
       ),
-      React.createElement(Card,{title:"👤 Responsáveis"},
+      React.createElement(Card,{title:"👤 Pessoas da casa"},
         React.createElement("div",{style:{display:"flex",flexWrap:"wrap",gap:8,marginBottom:12}},
           payers.map(p=>React.createElement("div",{key:p,style:{display:"flex",alignItems:"center",gap:6,background:"#f3f4f6",borderRadius:20,padding:"6px 14px"}},
             React.createElement("span",{style:{fontSize:13,fontWeight:600}},p),
@@ -479,7 +492,7 @@ function App(){
       if(!r.ok)throw new Error(r.error);
       if(r.driveUrl)setExpenses(p=>p.map(x=>x.id===e.id?{...x,driveUrl:r.driveUrl}:x));
       toast_("✅ Salvo!");
-    }catch(err){toast_("⚠️ Salvo local, falhou sync: "+err.message,"err");}
+    }catch(err){toast_("⚠️ Salvo local: "+err.message,"err");}
     setView("home");
   };
 
@@ -488,64 +501,57 @@ function App(){
     try{await api(cfg.scriptUrl,"deleteExpense",{id});}catch{}
     toast_("✅ Excluído");
   };
-
   const addPayer=async(name)=>{setPayers(p=>[...p,name]);try{await api(cfg.scriptUrl,"addPayer",{name});}catch{}};
   const deletePayer=async(name)=>{setPayers(p=>p.filter(x=>x!==name));try{await api(cfg.scriptUrl,"deletePayer",{name});}catch{}};
   const deleteLearning=async(merchant)=>{setLmap(p=>{const n={...p};delete n[merchant];return n;});try{await api(cfg.scriptUrl,"deleteLearning",{merchant});}catch{}};
-
-  const addCategory=async(cat)=>{
-    setCats(p=>[...p,cat]);
-    try{
-      const r=await api(cfg.scriptUrl,"addCategory",{category:cat});
-      if(!r?.ok)toast_("⚠️ Categoria salva local. Atualize o Apps Script para sincronizar.","err");
-      else toast_("✅ Categoria criada!");
-    }catch(err){toast_("⚠️ Local: " + err.message,"err");}
-  };
-
-  const deleteCategory=async(name)=>{
-    setCats(p=>p.filter(c=>c.n!==name));
-    try{await api(cfg.scriptUrl,"deleteCategory",{name});toast_("✅ Removida");}catch{}
-  };
-
-  const changeUrl=(newUrl)=>{
-    if(!newUrl?.trim())return;
-    setCfg({scriptUrl:newUrl.trim()});
-    setExpenses([]);setLmap({});setPayers(["Eu"]);setCats(DEFAULT_CATS);
-    toast_("🔄 URL atualizada!");
-  };
+  const addCategory=async(cat)=>{setCats(p=>[...p,cat]);try{const r=await api(cfg.scriptUrl,"addCategory",{category:cat});if(!r?.ok)toast_("⚠️ Local. Atualize o Apps Script.","err");else toast_("✅ Categoria criada!");}catch(err){toast_("⚠️ Local: "+err.message,"err");}};
+  const deleteCategory=async(name)=>{setCats(p=>p.filter(c=>c.n!==name));try{await api(cfg.scriptUrl,"deleteCategory",{name});toast_("✅ Removida");}catch{}};
+  const changeUrl=(newUrl)=>{if(!newUrl?.trim())return;setCfg({scriptUrl:newUrl.trim()});setExpenses([]);setLmap({});setPayers(["Eu"]);setCats(DEFAULT_CATS);toast_("🔄 URL atualizada!");};
 
   if(!cfg.scriptUrl)return React.createElement(React.Fragment,null,toast&&React.createElement(Toast,{t:toast}),React.createElement(SetupView,{toast_,onSave:url=>setCfg({scriptUrl:url})}));
-
   const RouteWrap=({children})=>React.createElement(React.Fragment,null,toast&&React.createElement(Toast,{t:toast}),children);
-
   if(view==="capture")return React.createElement(RouteWrap,null,React.createElement(CaptureView,{payers,lmap,cats,apiKey,onSave:saveExpense,onBack:()=>setView("home"),toast_}));
   if(view==="history")return React.createElement(RouteWrap,null,React.createElement(HistoryView,{expenses,cats,onBack:()=>setView("home"),onDelete:deleteExpense}));
   if(view==="settings")return React.createElement(RouteWrap,null,React.createElement(SettingsView,{payers,cfg,lmap,cats,apiKey,setApiKey,onAddPayer:addPayer,onDeletePayer:deletePayer,onChangeUrl:changeUrl,onDeleteLearning:deleteLearning,onAddCategory:addCategory,onDeleteCategory:deleteCategory,onBack:()=>setView("home"),toast_,onRefresh:syncDown,syncing}));
 
+  // ─── Dashboard ─────────────────────────────────────
   const now=new Date();
   const mExp=expenses.filter(e=>{const d=new Date(e.date+"T12:00");return d.getMonth()===now.getMonth()&&d.getFullYear()===now.getFullYear();});
   const mTotal=mExp.reduce((s,e)=>s+(+e.total||0),0);
   const lmExp=expenses.filter(e=>{const d=new Date(e.date+"T12:00"),lm=new Date(now.getFullYear(),now.getMonth()-1,1);return d.getMonth()===lm.getMonth()&&d.getFullYear()===lm.getFullYear();});
   const lmTotal=lmExp.reduce((s,e)=>s+(+e.total||0),0);
   const diff=mTotal-lmTotal;
+
   const catSum={};
   mExp.forEach(e=>{catSum[e.category]=(catSum[e.category]||0)+(+e.total||0);});
   const pie=Object.entries(catSum).map(([n,v])=>({n,v:+v.toFixed(2)})).sort((a,b)=>b.v-a.v);
+
+  // Per-person: paid + consumed
+  const perPerson={};
+  mExp.forEach(e=>{
+    const t=+e.total||0;
+    if(e.payer){perPerson[e.payer]=perPerson[e.payer]||{paid:0,consumed:0};perPerson[e.payer].paid+=t;}
+    const split=effectiveSplit(e);
+    if(split.length>0){
+      const share=t/split.length;
+      split.forEach(p=>{perPerson[p]=perPerson[p]||{paid:0,consumed:0};perPerson[p].consumed+=share;});
+    }
+  });
+  const perPersonArr=Object.entries(perPerson).map(([name,d])=>({name,paid:d.paid,consumed:d.consumed,balance:d.paid-d.consumed})).sort((a,b)=>b.balance-a.balance);
+
   const bar=Array.from({length:6},(_,i)=>{
     const d=new Date(now.getFullYear(),now.getMonth()-5+i,1);
     const v=expenses.filter(e=>{const ed=new Date(e.date+"T12:00");return ed.getMonth()===d.getMonth()&&ed.getFullYear()===d.getFullYear();}).reduce((s,e)=>s+(+e.total||0),0);
     return {l:d.toLocaleDateString("pt-BR",{month:"short"}),v:+v.toFixed(2)};
   });
   const maxBar=Math.max(...bar.map(b=>b.v),1);
-  const payerSums={};
-  mExp.forEach(e=>{payerSums[e.payer]=(payerSums[e.payer]||0)+(+e.total||0);});
 
   const PieChartSvg=()=>{
     let offset=0;
     const tot=pie.reduce((s,e)=>s+e.v,0)||1;
     const cx=60,cy=60,r=52,ri=30;
     const rad=a=>a*Math.PI/180;
-    return React.createElement("svg",{viewBox:"0 0 120 120",width:120,height:120},
+    return React.createElement("svg",{viewBox:"0 0 120 120",width:140,height:140},
       pie.map((e,i)=>{
         const pct=e.v/tot,angle=pct*360;
         const s=rad(offset-90),en=rad(offset+angle-90);
@@ -574,7 +580,7 @@ function App(){
         )
       ),
       React.createElement("div",{style:{display:"flex",gap:10,marginTop:20}},
-        [{label:"Transações",value:mExp.length},{label:"Categorias",value:pie.length},{label:"Aprendizados",value:Object.keys(lmap).length}].map(s=>
+        [{label:"Transações",value:mExp.length},{label:"Categorias",value:pie.length},{label:"Pessoas",value:perPersonArr.length}].map(s=>
           React.createElement("div",{key:s.label,style:{flex:1,background:"rgba(255,255,255,.12)",borderRadius:14,padding:"10px 12px"}},
             React.createElement("div",{style:{color:"#fff",fontWeight:700,fontSize:20}},s.value),
             React.createElement("div",{style:{color:"rgba(255,255,255,.6)",fontSize:11}},s.label)
@@ -583,29 +589,46 @@ function App(){
       )
     ),
     React.createElement("div",{style:{padding:"16px 16px 0"}},
-      pie.length>0?React.createElement("div",{style:{display:"flex",gap:12,marginBottom:14}},
-        React.createElement(Card,{style:{flex:1,marginBottom:0}},
-          React.createElement("div",{style:{fontSize:13,fontWeight:700,color:"#374151",marginBottom:8}},"Por categoria"),
-          React.createElement("div",{style:{display:"flex",justifyContent:"center"}},React.createElement(PieChartSvg)),
-          pie.slice(0,4).map((e,i)=>React.createElement("div",{key:i,style:{display:"flex",alignItems:"center",gap:5,fontSize:11,marginBottom:3}},
-            React.createElement("div",{style:{width:8,height:8,borderRadius:"50%",background:getCat(cats,e.n).c,flexShrink:0}}),
-            React.createElement("span",{style:{flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}},e.n),
-            React.createElement("span",{style:{fontWeight:700}},brl(e.v))
-          ))
-        ),
-        React.createElement(Card,{style:{flex:1,marginBottom:0}},
-          React.createElement("div",{style:{fontSize:13,fontWeight:700,color:"#374151",marginBottom:10}},"Por responsável"),
-          Object.entries(payerSums).length===0&&React.createElement("div",{style:{fontSize:12,color:"#9ca3af"}},"Sem dados"),
-          Object.entries(payerSums).map(([p,v])=>React.createElement("div",{key:p,style:{marginBottom:10}},
-            React.createElement("div",{style:{display:"flex",justifyContent:"space-between",fontSize:12,marginBottom:3}},React.createElement("span",null,p),React.createElement("span",{style:{fontWeight:700}},brl(v))),
-            React.createElement("div",{style:{height:6,background:"#f3f4f6",borderRadius:3}},React.createElement("div",{style:{height:"100%",background:"#2d5a3d",borderRadius:3,width:`${Math.min(100,(v/mTotal)*100)}%`}}))
-          ))
+      // Pie chart
+      pie.length>0?React.createElement(Card,{title:"Por categoria"},
+        React.createElement("div",{style:{display:"flex",alignItems:"center",gap:14}},
+          React.createElement(PieChartSvg),
+          React.createElement("div",{style:{flex:1,minWidth:0}},
+            pie.slice(0,6).map((e,i)=>React.createElement("div",{key:i,style:{display:"flex",alignItems:"center",gap:5,fontSize:12,marginBottom:5}},
+              React.createElement("div",{style:{width:8,height:8,borderRadius:"50%",background:getCat(cats,e.n).c,flexShrink:0}}),
+              React.createElement("span",{style:{flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}},e.n),
+              React.createElement("span",{style:{fontWeight:700}},brl(e.v))
+            ))
+          )
         )
       ):React.createElement("div",{style:{textAlign:"center",padding:"28px 20px",color:"#9ca3af",background:"#fff",borderRadius:20,marginBottom:14}},
         React.createElement("div",{style:{fontSize:44,marginBottom:8}},"📊"),
         React.createElement("div",{style:{fontWeight:600}},"Nenhum gasto este mês"),
         React.createElement("div",{style:{fontSize:13}},"Toque em + para adicionar")
       ),
+
+      // Per-person summary
+      perPersonArr.length>0&&React.createElement(Card,{title:"👥 Resumo por pessoa"},
+        perPersonArr.map(p=>{
+          const balanceColor=p.balance>0.01?"#16a34a":p.balance<-0.01?"#dc2626":"#6b7280";
+          const balanceText=p.balance>0.01?`+${brl(p.balance)}`:p.balance<-0.01?`-${brl(Math.abs(p.balance))}`:brl(0);
+          return React.createElement("div",{key:p.name,style:{padding:"12px 0",borderBottom:"1px solid #f0ede6"}},
+            React.createElement("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}},
+              React.createElement("div",{style:{fontWeight:700,fontSize:14}},p.name),
+              React.createElement("div",{style:{fontWeight:700,fontSize:15,color:balanceColor}},balanceText)
+            ),
+            React.createElement("div",{style:{display:"flex",justifyContent:"space-between",fontSize:11,color:"#6b7280"}},
+              React.createElement("span",null,"💳 Pagou ",React.createElement("b",{style:{color:"#374151"}},brl(p.paid))),
+              React.createElement("span",null,"🛒 Consumiu ",React.createElement("b",{style:{color:"#374151"}},brl(p.consumed)))
+            )
+          );
+        }),
+        React.createElement("div",{style:{marginTop:10,padding:10,background:"#f9fafb",borderRadius:10,fontSize:11,color:"#6b7280",lineHeight:1.5}},
+          "💡 ",React.createElement("b",null,"Saldo positivo (+)"),": pagou mais do que consumiu — deve receber. ",React.createElement("b",null,"Negativo (−)"),": consumiu mais do que pagou — deve."
+        )
+      ),
+
+      // Bar chart
       React.createElement(Card,{title:"Últimos 6 meses"},
         React.createElement("div",{style:{display:"flex",alignItems:"flex-end",gap:8,height:130,paddingTop:10}},
           bar.map((b,i)=>{
@@ -618,6 +641,8 @@ function App(){
           })
         )
       ),
+
+      // Recent
       React.createElement("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}},
         React.createElement("h3",{style:{margin:0,fontSize:15,fontWeight:700}},"Recentes"),
         React.createElement("button",{onClick:()=>setView("history"),style:{background:"none",border:"none",color:"#2d5a3d",fontWeight:600,fontSize:13}},"Ver tudo →")
@@ -640,6 +665,9 @@ function App(){
 }
 
 ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(App));
+</script>
+</body>
+</html>
 </script>
 </body>
 </html>
