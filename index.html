@@ -90,15 +90,20 @@ async function api(url,action,params={}){
   return r.json();
 }
 
-async function callClaude(b64,lmap,cats,apiKey){
+async function callClaude(b64,mimeType,lmap,cats,apiKey){
   if(!apiKey)throw new Error("Chave API não configurada");
   const hints=Object.entries(lmap).map(([m,c])=>`"${m}"→${c}`).join("; ");
+  const isPdf=mimeType==="application/pdf";
+  const contentBlock=isPdf
+    ?{type:"document",source:{type:"base64",media_type:"application/pdf",data:b64}}
+    :{type:"image",source:{type:"base64",media_type:mimeType||"image/jpeg",data:b64}};
+  
   const res=await fetch("https://api.anthropic.com/v1/messages",{
     method:"POST",
     headers:{"Content-Type":"application/json","x-api-key":apiKey,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
     body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:800,messages:[{role:"user",content:[
-      {type:"image",source:{type:"base64",media_type:"image/jpeg",data:b64}},
-      {type:"text",text:`Analise o comprovante e retorne APENAS JSON:\n{"merchant":"nome","total":0.00,"date":"YYYY-MM-DD","category":"cat","items":[]}\n\nCategorias: ${cats.map(c=>c.n).join(", ")}\n${hints?`\nAprendizado: ${hints}`:""}`}
+      contentBlock,
+      {type:"text",text:`Analise o comprovante/cupom/nota fiscal e retorne APENAS JSON:\n{"merchant":"nome","total":0.00,"date":"YYYY-MM-DD","category":"cat","items":[]}\n\nCategorias: ${cats.map(c=>c.n).join(", ")}\n${hints?`\nAprendizado: ${hints}`:""}`}
     ]}]})
   });
   if(!res.ok){const e=await res.text();throw new Error("API "+res.status+": "+e.slice(0,150));}
@@ -127,11 +132,12 @@ const Card=({title,children,style={}})=>React.createElement("div",{style:{backgr
 const ExpRow=({e,cats})=>{
   const cat=getCat(cats,e.category);
   const split=effectiveSplit(e);
+  const isPdf=e.driveUrl&&/\.pdf(\?|$)/i.test(e.driveUrl);
   return React.createElement("div",{style:{display:"flex",alignItems:"center",gap:12,padding:"11px 0",borderBottom:"1px solid #f0ede6"}},
     React.createElement("div",{style:{width:40,height:40,borderRadius:13,background:cat.c+"20",display:"flex",alignItems:"center",justifyContent:"center",fontSize:18,flexShrink:0}},cat.i),
     React.createElement("div",{style:{flex:1,minWidth:0}},
       React.createElement("div",{style:{fontWeight:600,fontSize:13,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}},e.merchant||"Sem nome"),
-      React.createElement("div",{style:{fontSize:11,color:"#6b7280"}},`${dtBR(e.date)} · ${e.payer}${split.length>1?` · ÷${split.length}`:""}${e.driveUrl?" · 📎":""}`)
+      React.createElement("div",{style:{fontSize:11,color:"#6b7280"}},`${dtBR(e.date)} · ${e.payer}${split.length>1?` · ÷${split.length}`:""}${e.driveUrl?(isPdf?" · 📄":" · 📎"):""}`)
     ),
     React.createElement("div",{style:{fontWeight:700,fontSize:14,flexShrink:0,textAlign:"right"}},
       React.createElement("div",null,brl(e.total)),
@@ -156,8 +162,20 @@ const Header=({title,onBack,subtitle,right})=>React.createElement("div",{style:{
   )
 );
 
-// ─── Form de revisão (compartilhado) ──────────────────────────
-function ReviewForm({preview,result,setResult,payer,setPayer,splitWith,setSplitWith,payers,cats,onSave,saveLabel="💾 Salvar gasto",extraButton}){
+// Preview slot: imagem ou card de PDF
+const PreviewBox=({imageUrl,pdfFilename})=>{
+  if(imageUrl)return React.createElement("div",{style:{marginBottom:14,borderRadius:16,overflow:"hidden",height:130}},React.createElement("img",{src:imageUrl,style:{width:"100%",height:"100%",objectFit:"cover"}}));
+  if(pdfFilename)return React.createElement("div",{style:{marginBottom:14,borderRadius:16,padding:24,background:"linear-gradient(135deg,#fee2e2,#fecaca)",display:"flex",alignItems:"center",gap:14}},
+    React.createElement("div",{style:{fontSize:48}},"📄"),
+    React.createElement("div",{style:{flex:1,minWidth:0}},
+      React.createElement("div",{style:{fontWeight:700,fontSize:14,color:"#991b1b",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}},pdfFilename),
+      React.createElement("div",{style:{fontSize:11,color:"#7f1d1d",marginTop:2}},"Documento PDF do Drive")
+    )
+  );
+  return null;
+};
+
+function ReviewForm({imageUrl,pdfFilename,result,setResult,payer,setPayer,splitWith,setSplitWith,payers,cats,onSave,saveLabel="💾 Salvar gasto",extraButton}){
   const set=(k,v)=>setResult(p=>({...p,[k]:v}));
   
   useEffect(()=>{
@@ -177,7 +195,7 @@ function ReviewForm({preview,result,setResult,payer,setPayer,splitWith,setSplitW
   const valorPorPessoa=parseFloat((result.total||"0").replace(",","."))/Math.max(1,splitWith.length);
 
   return React.createElement("div",{style:{padding:16}},
-    preview&&React.createElement("div",{style:{marginBottom:14,borderRadius:16,overflow:"hidden",height:130}},React.createElement("img",{src:preview,style:{width:"100%",height:"100%",objectFit:"cover"}})),
+    React.createElement(PreviewBox,{imageUrl,pdfFilename}),
     React.createElement(Card,{title:"Dados do comprovante"},
       React.createElement(Label,null,"Estabelecimento"),
       React.createElement(InputEl,{value:result.merchant,onChange:v=>set("merchant",v),placeholder:"Ex: Pão de Açúcar"}),
@@ -254,7 +272,7 @@ function SetupView({onSave,toast_}){
 
 function CaptureView({payers,lmap,cats,apiKey,onSave,onBack,toast_}){
   const [stage,setStage]=useState("pick");
-  const [preview,setPreview]=useState(null);
+  const [imageUrl,setImageUrl]=useState(null);
   const [b64,setB64]=useState(null);
   const [result,setResult]=useState({merchant:"",total:"",date:today(),category:"Outros",items:[]});
   const [payer,setPayer]=useState(payers[0]||"Eu");
@@ -264,12 +282,12 @@ function CaptureView({payers,lmap,cats,apiKey,onSave,onBack,toast_}){
   const handleFile=async(file)=>{
     if(!file)return;
     if(!apiKey){toast_("⚠️ Configure a chave da Anthropic em ⚙️","err");return;}
-    setPreview(URL.createObjectURL(file));
+    setImageUrl(URL.createObjectURL(file));
     setStage("analyzing");
     try{
       const img=await compress(file);
       setB64(img);
-      const r=await callClaude(img,lmap,cats,apiKey);
+      const r=await callClaude(img,"image/jpeg",lmap,cats,apiKey);
       setResult({merchant:r.merchant||"",total:r.total!=null?String(r.total):"",date:r.date||today(),category:cats.find(c=>c.n===r.category)?.n||cats[0]?.n||"Outros",items:r.items||[]});
       setStage("review");
     }catch(err){toast_("⚠️ "+err.message,"err");setStage("manual");}
@@ -280,7 +298,7 @@ function CaptureView({payers,lmap,cats,apiKey,onSave,onBack,toast_}){
     if(!v){toast_("Informe o valor","err");return;}
     if(splitWith.length===0){toast_("Selecione quem divide","err");return;}
     setStage("saving");
-    await onSave({...result,total:v,payer,splitWith,imageBase64:b64});
+    await onSave({...result,total:v,payer,splitWith,imageBase64:b64,mimeType:"image/jpeg"});
   };
 
   if(stage==="pick")return React.createElement(Wrap,{pb:20},
@@ -302,7 +320,7 @@ function CaptureView({payers,lmap,cats,apiKey,onSave,onBack,toast_}){
   if(stage==="analyzing")return React.createElement(Wrap,{pb:20},
     React.createElement(Header,{title:"Analisando...",onBack}),
     React.createElement("div",{style:{display:"flex",flexDirection:"column",alignItems:"center",padding:60,gap:24}},
-      preview&&React.createElement("img",{src:preview,style:{width:130,height:130,objectFit:"cover",borderRadius:16}}),
+      imageUrl&&React.createElement("img",{src:imageUrl,style:{width:130,height:130,objectFit:"cover",borderRadius:16}}),
       React.createElement(Spinner,{size:48,color:"#2d5a3d"}),
       React.createElement("div",{style:{fontWeight:600,color:"#374151",textAlign:"center",fontSize:15}},"Claude está analisando...")
     )
@@ -318,16 +336,18 @@ function CaptureView({payers,lmap,cats,apiKey,onSave,onBack,toast_}){
 
   return React.createElement(Wrap,{pb:20},
     React.createElement(Header,{title:"Revisar dados",onBack}),
-    React.createElement(ReviewForm,{preview,result,setResult,payer,setPayer,splitWith,setSplitWith,payers,cats,onSave:handleSave})
+    React.createElement(ReviewForm,{imageUrl,result,setResult,payer,setPayer,splitWith,setSplitWith,payers,cats,onSave:handleSave})
   );
 }
 
-// ─── UPLOAD PROCESSOR ─────────────────────────────────────
+// ─── UPLOAD PROCESSOR (com PDF) ──────────────────────────
 function UploadProcessor({uploads,payers,lmap,cats,apiKey,scriptUrl,onSave,onDeleteUpload,onFinish,toast_}){
   const [idx,setIdx]=useState(0);
   const [stage,setStage]=useState("loading");
   const [b64,setB64]=useState(null);
-  const [preview,setPreview]=useState(null);
+  const [mimeType,setMimeType]=useState("image/jpeg");
+  const [imageUrl,setImageUrl]=useState(null);
+  const [pdfFilename,setPdfFilename]=useState(null);
   const [result,setResult]=useState({merchant:"",total:"",date:today(),category:"Outros",items:[]});
   const [payer,setPayer]=useState(payers[0]||"Eu");
   const [splitWith,setSplitWith]=useState([...payers]);
@@ -342,19 +362,33 @@ function UploadProcessor({uploads,payers,lmap,cats,apiKey,scriptUrl,onSave,onDel
     setResult({merchant:"",total:"",date:today(),category:"Outros",items:[]});
     setPayer(payers[0]||"Eu");
     setSplitWith([...payers]);
+    setImageUrl(null);
+    setPdfFilename(null);
     
     try{
       const r=await api(scriptUrl,"getUploadFile",{id:uploads[idx].id});
       if(!r.ok)throw new Error(r.error||"Falha");
       
-      // Recomprime para JPEG e reduz tamanho
-      const compressed=await recompressBase64(r.base64,r.mimeType);
-      setB64(compressed);
-      setPreview("data:image/jpeg;base64,"+compressed);
+      const isPdf=r.mimeType==="application/pdf";
+      let finalB64=r.base64;
+      let finalMime=r.mimeType;
+
+      if(!isPdf){
+        // Recomprime imagens para JPEG
+        finalB64=await recompressBase64(r.base64,r.mimeType);
+        finalMime="image/jpeg";
+        setImageUrl("data:image/jpeg;base64,"+finalB64);
+      }else{
+        // PDF: mantém original, mostra placeholder
+        setPdfFilename(r.name||uploads[idx].name);
+      }
+
+      setB64(finalB64);
+      setMimeType(finalMime);
       setStage("analyzing");
       
       try{
-        const claude=await callClaude(compressed,lmap,cats,apiKey);
+        const claude=await callClaude(finalB64,finalMime,lmap,cats,apiKey);
         setResult({
           merchant:claude.merchant||"",
           total:claude.total!=null?String(claude.total):"",
@@ -377,7 +411,7 @@ function UploadProcessor({uploads,payers,lmap,cats,apiKey,scriptUrl,onSave,onDel
     if(!v){toast_("Informe o valor","err");return;}
     if(splitWith.length===0){toast_("Selecione quem divide","err");return;}
     setStage("saving");
-    await onSave({...result,total:v,payer,splitWith,imageBase64:b64});
+    await onSave({...result,total:v,payer,splitWith,imageBase64:b64,mimeType});
     await onDeleteUpload(uploads[idx].id);
     setIdx(idx+1);
   };
@@ -408,9 +442,10 @@ function UploadProcessor({uploads,payers,lmap,cats,apiKey,scriptUrl,onSave,onDel
   if(stage==="analyzing")return React.createElement(Wrap,{pb:20},
     React.createElement(Header,{title:"Analisando...",subtitle,onBack:onFinish}),
     React.createElement("div",{style:{display:"flex",flexDirection:"column",alignItems:"center",padding:60,gap:24}},
-      preview&&React.createElement("img",{src:preview,style:{width:130,height:130,objectFit:"cover",borderRadius:16}}),
+      imageUrl&&React.createElement("img",{src:imageUrl,style:{width:130,height:130,objectFit:"cover",borderRadius:16}}),
+      pdfFilename&&React.createElement("div",{style:{fontSize:64}},"📄"),
       React.createElement(Spinner,{size:48,color:"#2d5a3d"}),
-      React.createElement("div",{style:{fontWeight:600,color:"#374151",fontSize:14,textAlign:"center"}},"Claude está lendo...")
+      React.createElement("div",{style:{fontWeight:600,color:"#374151",fontSize:14,textAlign:"center"}},"Claude está lendo "+(pdfFilename?"o PDF":"o comprovante")+"...")
     )
   );
 
@@ -422,13 +457,12 @@ function UploadProcessor({uploads,payers,lmap,cats,apiKey,scriptUrl,onSave,onDel
     )
   );
 
-  // review
   const skipBtn=React.createElement("button",{onClick:handleSkip,style:{padding:16,borderRadius:16,border:"2px solid #e5e7eb",background:"#fff",color:"#6b7280",fontSize:14,fontWeight:600,whiteSpace:"nowrap"}},"⏭ Pular");
   const discardBtn=React.createElement("button",{onClick:handleDiscard,style:{padding:16,borderRadius:16,border:"2px solid #fecaca",background:"#fff",color:"#dc2626",fontSize:14,fontWeight:600,whiteSpace:"nowrap"}},"🗑️");
 
   return React.createElement(Wrap,{pb:20},
     React.createElement(Header,{title:"Revisar comprovante",subtitle,onBack:onFinish}),
-    React.createElement(ReviewForm,{preview,result,setResult,payer,setPayer,splitWith,setSplitWith,payers,cats,onSave:handleSave,saveLabel:idx+1<uploads.length?"💾 Salvar e próximo →":"💾 Salvar e finalizar",extraButton:React.createElement(React.Fragment,null,discardBtn,skipBtn)})
+    React.createElement(ReviewForm,{imageUrl,pdfFilename,result,setResult,payer,setPayer,splitWith,setSplitWith,payers,cats,onSave:handleSave,saveLabel:idx+1<uploads.length?"💾 Salvar e próximo →":"💾 Salvar e finalizar",extraButton:React.createElement(React.Fragment,null,discardBtn,skipBtn)})
   );
 }
 
@@ -530,7 +564,7 @@ function SettingsView({payers,cfg,lmap,cats,apiKey,setApiKey,uploadFolderUrl,onA
     React.createElement(Header,{title:"Configurações",onBack}),
     React.createElement("div",{style:{padding:16}},
       React.createElement(Card,{title:"📥 Pasta UPLOAD do Drive"},
-        React.createElement("div",{style:{fontSize:12,color:"#6b7280",marginBottom:10,lineHeight:1.5}},"Arraste comprovantes nessa pasta no Drive ou Desktop. Depois abra o app e clique em 'Comprovantes para revisar'."),
+        React.createElement("div",{style:{fontSize:12,color:"#6b7280",marginBottom:10,lineHeight:1.5}},"Arraste imagens ou PDFs nessa pasta no Drive ou Desktop. Depois abra o app e clique em 'Comprovantes para revisar'."),
         uploadFolderUrl?React.createElement("a",{href:uploadFolderUrl,target:"_blank",style:{display:"block",padding:"10px 14px",borderRadius:12,background:"#7c3aed",color:"#fff",textDecoration:"none",fontWeight:700,fontSize:13,textAlign:"center"}},"🔗 Abrir pasta upload no Drive"):React.createElement("div",{style:{fontSize:11,color:"#9ca3af"}},"Pasta criada após o primeiro upload.")
       ),
       React.createElement(Card,{title:"🤖 Chave da Anthropic (IA)"},
@@ -756,7 +790,6 @@ function App(){
       )
     ),
     React.createElement("div",{style:{padding:"16px 16px 0"}},
-      // Banner UPLOAD pendente
       pendingUploads.length>0&&React.createElement("button",{onClick:()=>setView("upload"),className:"pulse",style:{width:"100%",padding:"16px 18px",borderRadius:18,border:"none",background:"linear-gradient(135deg,#f59e0b,#ea580c)",color:"#fff",fontWeight:700,fontSize:14,marginBottom:14,display:"flex",alignItems:"center",justifyContent:"space-between",gap:8,boxShadow:"0 4px 16px rgba(234,88,12,.35)"}},
         React.createElement("div",{style:{display:"flex",alignItems:"center",gap:10}},
           React.createElement("span",{style:{fontSize:24}},"📥"),
