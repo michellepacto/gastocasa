@@ -2147,45 +2147,49 @@ function LocalFileProcessor({files,payers,lmap,cats,apiKey,imports,accounts,matc
 // Cada despesa é lançada com flag reviewed=false, mostrando ícone ! no histórico.
 function BulkUploadProcessor({uploads,expensesAll,payers,lmap,cats,apiKey,scriptUrl,imports,accounts,matchPenalties,onSaveBulk,onDeleteUpload,onMoveToErrors,onFinish,toast_}){
   const [idx,setIdx]=useState(0);
-  const [stage,setStage]=useState("config"); // começa na tela de configuração
+  const [stage,setStage]=useState("config");
   const [defaultPayer,setDefaultPayer]=useState(payers[0]||"");
   const [currentFile,setCurrentFile]=useState(null);
   const [stats,setStats]=useState({success:0,linked:0,failed:0,skipped:0});
   const [log,setLog]=useState([]);
   const cancelRef=useRef(false);
+  const uploadsRef=useRef(uploads);
+  const payerRef=useRef(defaultPayer);
+  
+  // Mantém refs sempre atualizados
+  useEffect(()=>{uploadsRef.current=uploads;},[uploads]);
+  useEffect(()=>{payerRef.current=defaultPayer;},[defaultPayer]);
   
   const addLog=(msg,type="ok")=>{
     setLog(p=>[{msg,type,at:Date.now()},...p].slice(0,8));
   };
   
+  // Cleanup só quando desmonta
+  useEffect(()=>{return()=>{cancelRef.current=true;};},[]);
+  
   const startProcessing=()=>{
     if(!defaultPayer){toast_("Escolha o pagador padrão","err");return;}
     cancelRef.current=false;
     setStage("processing");
+    // Passa uploads e payer diretamente para evitar problemas de closure/estado
+    const currentUploads=uploadsRef.current;
+    const currentPayer=payerRef.current;
+    setTimeout(()=>processAll(currentUploads,currentPayer),100);
   };
   
-  // Cleanup só roda quando o componente desmonta
-  useEffect(()=>{
-    return()=>{cancelRef.current=true;};
-  },[]);
-  
-  useEffect(()=>{
-    if(stage==="processing"){
-      cancelRef.current=false; // garante que está liberado pra rodar
-      processAll();
-    }
-  },[stage]);
-  
-  const processAll=async()=>{
+  const processAll=async(uploadsList,payerDefault)=>{
+    // Usa os parâmetros passados diretamente (não depende de closure)
+    const filesToProcess=uploadsList||uploads||[];
+    const payerFallback=payerDefault||defaultPayer||payers[0]||"";
+    addLog(`🚀 Iniciando: ${filesToProcess.length} arquivo(s)`);
     let successCount=0,linkedCount=0,failedCount=0,skippedCount=0;
     let consecutiveFailures=0;
     
     // Mecanismo 1: deduplicação por DriveFileID
-    // Coleta IDs de arquivos já processados antes
     const usedFileIds=new Set();
     (expensesAll||[]).forEach(e=>{if(e.driveFileId)usedFileIds.add(e.driveFileId);});
     
-    for(let i=0;i<uploads.length;i++){
+    for(let i=0;i<filesToProcess.length;i++){
       if(cancelRef.current)break;
       
       // Se falhou 3x seguidas, problema sistêmico — para tudo
@@ -2194,7 +2198,7 @@ function BulkUploadProcessor({uploads,expensesAll,payers,lmap,cats,apiKey,script
         break;
       }
       
-      const upload=uploads[i];
+      const upload=filesToProcess[i];
       setIdx(i);
       setCurrentFile(upload);
       
@@ -2242,7 +2246,7 @@ function BulkUploadProcessor({uploads,expensesAll,payers,lmap,cats,apiKey,script
         const items=claude.items||[];
         
         // 4. Tenta achar match bancário
-        let importId="",accountName="",payer=defaultPayer||payers[0]||"";
+        let importId="",accountName="",payer=payerFallback||payers[0]||"";
         const tempExp={merchant,total:v,date};
         const matches=findImportMatches(tempExp,imports||[],50,matchPenalties);
         if(matches.length>0){
@@ -2280,7 +2284,7 @@ function BulkUploadProcessor({uploads,expensesAll,payers,lmap,cats,apiKey,script
         try{await onDeleteUpload(upload.id);}catch{}
         
         // 7. Pausa antes do próximo
-        if(i+1<uploads.length&&!cancelRef.current){
+        if(i+1<filesToProcess.length&&!cancelRef.current){
           const waitSecs=isPdf?8:4;
           await new Promise(res=>setTimeout(res,waitSecs*1000));
         }
@@ -2302,7 +2306,7 @@ function BulkUploadProcessor({uploads,expensesAll,payers,lmap,cats,apiKey,script
         }
         
         // Backoff progressivo: 5s, 15s, 30s entre falhas seguidas
-        if(i+1<uploads.length&&!cancelRef.current){
+        if(i+1<filesToProcess.length&&!cancelRef.current){
           const backoff=consecutiveFailures===1?5:consecutiveFailures===2?15:30;
           addLog(`⏸️ Aguardando ${backoff}s antes de tentar o próximo...`,"warn");
           await new Promise(res=>setTimeout(res,backoff*1000));
