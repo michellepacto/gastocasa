@@ -1674,36 +1674,65 @@ function UploadProcessor({uploads,payers,lmap,cats,apiKey,scriptUrl,onSave,onDel
   const [imageUrl,setImageUrl]=useState(null);const [pdfFilename,setPdfFilename]=useState(null);
   const [result,setResult]=useState({merchant:"",total:"",date:today(),category:"Outros",items:[]});
   const [payer,setPayer]=useState(payers[0]||"Eu");const [splitWith,setSplitWith]=useState([...payers]);
+  const [fromCache,setFromCache]=useState(false);
+  // Cache persistente entre renders: id do arquivo → análise da IA
+  // Evita REPROCESSAR arquivos com Claude se você voltar para a tela
+  const analysisCache=useRef({});
+  const fileCache=useRef({}); // id → {b64, mimeType, name}
+  
   useEffect(()=>{if(idx>=uploads.length){onFinish();return;}processCurrentFile();},[idx]);
+  
   const processCurrentFile=async()=>{
     setStage("loading");setResult({merchant:"",total:"",date:today(),category:"Outros",items:[]});
-    setPayer(payers[0]||"Eu");setSplitWith([...payers]);setImageUrl(null);setPdfFilename(null);
+    setPayer(payers[0]||"Eu");setSplitWith([...payers]);setImageUrl(null);setPdfFilename(null);setFromCache(false);
+    
+    const fileId=uploads[idx].id;
+    
     try{
-      const r=await api(scriptUrl,"getUploadFile",{id:uploads[idx].id});
-      if(!r.ok)throw new Error(r.error||"Falha");const isPdf=r.mimeType==="application/pdf";
-      let finalB64=r.base64,finalMime=r.mimeType;
-      if(!isPdf){finalB64=await recompressBase64(r.base64,r.mimeType);finalMime="image/jpeg";setImageUrl("data:image/jpeg;base64,"+finalB64);}
-      else{setPdfFilename(r.name||uploads[idx].name);}
-      setB64(finalB64);setMimeType(finalMime);setStage("analyzing");
+      // 1. CACHE DE ARQUIVO: já baixou esse antes? não baixa de novo
+      let fileData=fileCache.current[fileId];
+      if(!fileData){
+        const r=await api(scriptUrl,"getUploadFile",{id:fileId});
+        if(!r.ok)throw new Error(r.error||"Falha");
+        const isPdf=r.mimeType==="application/pdf";
+        let finalB64=r.base64,finalMime=r.mimeType;
+        if(!isPdf){finalB64=await recompressBase64(r.base64,r.mimeType);finalMime="image/jpeg";}
+        fileData={b64:finalB64,mimeType:finalMime,name:r.name||uploads[idx].name,isPdf};
+        fileCache.current[fileId]=fileData;
+      }
+      
+      if(fileData.isPdf)setPdfFilename(fileData.name);
+      else setImageUrl("data:image/jpeg;base64,"+fileData.b64);
+      setB64(fileData.b64);setMimeType(fileData.mimeType);
+      
+      // 2. CACHE DE ANÁLISE: já analisou esse com Claude antes? usa o cache
+      let claude=analysisCache.current[fileId];
+      if(claude){
+        setFromCache(true);
+        setResult({merchant:claude.merchant||"",total:claude.total!=null?String(claude.total):"",date:claude.date||today(),category:cats.find(c=>c.n===claude.category)?.n||cats[0]?.n||"Outros",items:claude.items||[]});
+        setStage("review");
+        return;
+      }
+      
+      // Não tem cache → chama Claude (com retry em rate limit)
+      setStage("analyzing");
       try{
-        // Tenta chamar Claude, com retry automático se der rate limit
-        let claude=null;
         let attempts=0;
         while(attempts<3){
           try{
-            claude=await callClaude(finalB64,finalMime,lmap,cats,apiKey);
+            claude=await callClaude(fileData.b64,fileData.mimeType,lmap,cats,apiKey);
             break;
           }catch(err){
             if(err.message.includes("429")||err.message.includes("rate_limit")){
               attempts++;
               const waitSecs=attempts===1?10:attempts===2?20:30;
               await sleepWithCountdown(waitSecs,toast_,"⏳ Limite da API. Aguardando");
-            }else{
-              throw err; // outro erro, não tenta de novo
-            }
+            }else{throw err;}
           }
         }
         if(claude){
+          // Guarda no cache pra não chamar IA de novo
+          analysisCache.current[fileId]=claude;
           setResult({merchant:claude.merchant||"",total:claude.total!=null?String(claude.total):"",date:claude.date||today(),category:cats.find(c=>c.n===claude.category)?.n||cats[0]?.n||"Outros",items:claude.items||[]});
         }else{
           toast_("⚠️ IA falhou após 3 tentativas. Preencha manualmente.","err");
@@ -1712,23 +1741,56 @@ function UploadProcessor({uploads,payers,lmap,cats,apiKey,scriptUrl,onSave,onDel
       setStage("review");
     }catch(err){toast_("⚠️ "+err.message,"err");setIdx(idx+1);}
   };
+  
   const handleSave=async()=>{
     const v=parseFloat((result.total||"0").replace(",","."));
     if(!v){toast_("Informe o valor","err");return;}
     if(splitWith.length===0){toast_("Selecione quem divide","err");return;}
     setStage("saving");
-    await onSave({...result,total:v,payer,splitWith,imageBase64:b64,mimeType});
-    await onDeleteUpload(uploads[idx].id);
-    // Pausa adaptativa: PDF é maior em tokens → espera mais
+    
+    const fileId=uploads[idx].id;
+    
+    // SAVE: tenta salvar a despesa
+    try{
+      await onSave({...result,total:v,payer,splitWith,imageBase64:b64,mimeType});
+    }catch(err){
+      toast_("⚠️ Falha ao salvar: "+err.message,"err");
+      // Não apaga do Drive se save falhou — você pode tentar de novo
+      setStage("review");
+      return;
+    }
+    
+    // DELETE: tenta apagar do Drive (mesmo se save deu certo, é independente)
+    // Se delete falhar, NÃO impede de prosseguir — apaga manualmente depois
+    try{
+      await onDeleteUpload(fileId);
+      // Limpa caches deste arquivo (já foi processado)
+      delete analysisCache.current[fileId];
+      delete fileCache.current[fileId];
+    }catch(err){
+      toast_("⚠️ Salvou, mas falhou ao apagar do Drive (apague manualmente)","err");
+    }
+    
     if(idx+1<uploads.length){
       const waitSecs=mimeType==="application/pdf"?8:4;
       await sleepWithCountdown(waitSecs,toast_,"⏳ Próximo em");
     }
     setIdx(idx+1);
   };
-  const handleSkip=()=>{if(!confirm("Pular este?"))return;setIdx(idx+1);};
-  const handleDiscard=async()=>{if(!confirm("Descartar?"))return;setStage("loading");await onDeleteUpload(uploads[idx].id);setIdx(idx+1);};
-  const subtitle=`${idx+1} de ${uploads.length}`;
+  
+  const handleSkip=()=>{if(!confirm("Pular este? (volta para a fila depois)"))return;setIdx(idx+1);};
+  const handleDiscard=async()=>{
+    if(!confirm("Descartar este arquivo? (apaga do Drive sem registrar)"))return;
+    const fileId=uploads[idx].id;
+    setStage("loading");
+    try{
+      await onDeleteUpload(fileId);
+      delete analysisCache.current[fileId];
+      delete fileCache.current[fileId];
+    }catch{toast_("⚠️ Falha ao apagar","err");}
+    setIdx(idx+1);
+  };
+  const subtitle=`${idx+1} de ${uploads.length}${fromCache?" · ⚡ cache":""}`;
   if(stage==="loading")return React.createElement(Wrap,{pb:20},React.createElement(Header,{title:"Carregando...",subtitle,onBack:onFinish}),React.createElement("div",{style:{display:"flex",flexDirection:"column",alignItems:"center",padding:60,gap:20}},React.createElement(Spinner,{size:48,color:"#2d5a3d"})));
   if(stage==="analyzing")return React.createElement(Wrap,{pb:20},React.createElement(Header,{title:"Analisando...",subtitle,onBack:onFinish}),
     React.createElement("div",{style:{display:"flex",flexDirection:"column",alignItems:"center",padding:60,gap:24}},
@@ -1758,6 +1820,9 @@ function LocalFileProcessor({files,payers,lmap,cats,apiKey,imports,accounts,matc
   const [payer,setPayer]=useState(payers[0]||"Eu");
   const [splitWith,setSplitWith]=useState([...payers]);
   const [matches,setMatches]=useState([]);
+  const [fromCache,setFromCache]=useState(false);
+  // Cache: índice → análise da IA (para não reprocessar se voltar)
+  const analysisCache=useRef({});
 
   useEffect(()=>{
     if(idx>=files.length){onFinish();return;}
@@ -1768,20 +1833,21 @@ function LocalFileProcessor({files,payers,lmap,cats,apiKey,imports,accounts,matc
     setStage("loading");
     setResult({merchant:"",total:"",date:today(),category:"Outros",items:[]});
     setPayer(payers[0]||"Eu");setSplitWith([...payers]);
-    setImageUrl(null);setPdfFilename(null);setMatches([]);
+    setImageUrl(null);setPdfFilename(null);setMatches([]);setFromCache(false);
 
     const file=files[idx];
+    // Chave única para o arquivo (mesmo nome+tamanho = mesmo arquivo)
+    const fileKey=`${file.name}_${file.size}_${file.lastModified}`;
+    
     try{
       const isPdf=file.type==="application/pdf";
       let finalB64,finalMime;
 
       if(!isPdf){
-        // Lê e comprime imagem
         finalB64=await compress(file);
         finalMime="image/jpeg";
         setImageUrl("data:image/jpeg;base64,"+finalB64);
       }else{
-        // Lê PDF como base64
         const buf=await file.arrayBuffer();
         const bytes=new Uint8Array(buf);
         let bin="";for(let i=0;i<bytes.length;i++)bin+=String.fromCharCode(bytes[i]);
@@ -1790,10 +1856,34 @@ function LocalFileProcessor({files,payers,lmap,cats,apiKey,imports,accounts,matc
         setPdfFilename(file.name);
       }
 
-      setB64(finalB64);setMimeType(finalMime);setStage("analyzing");
+      setB64(finalB64);setMimeType(finalMime);
+      
+      // CACHE: já analisou esse arquivo?
+      let claude=analysisCache.current[fileKey];
+      if(claude){
+        setFromCache(true);
+        const res={
+          merchant:claude.merchant||"",
+          total:claude.total!=null?String(claude.total):"",
+          date:claude.date||today(),
+          category:cats.find(c=>c.n===claude.category)?.n||cats[0]?.n||"Outros",
+          items:claude.items||[]
+        };
+        setResult(res);
+        const v=parseFloat((res.total||"0").replace(",","."));
+        if(v&&res.date){
+          const tempExp={merchant:res.merchant,total:v,date:res.date};
+          const found=findImportMatches(tempExp,imports||[],50,matchPenalties);
+          setMatches(found);
+        }
+        setStage("review");
+        return;
+      }
+      
+      setStage("analyzing");
 
-      // Chama Claude com retry em rate limit
-      let claude=null,attempts=0;
+      // Chama Claude com retry
+      let attempts=0;
       while(attempts<3){
         try{claude=await callClaude(finalB64,finalMime,lmap,cats,apiKey);break;}
         catch(err){
@@ -1806,6 +1896,8 @@ function LocalFileProcessor({files,payers,lmap,cats,apiKey,imports,accounts,matc
       }
 
       if(claude){
+        // Guarda no cache para não chamar IA de novo se voltar
+        analysisCache.current[fileKey]=claude;
         const res={
           merchant:claude.merchant||"",
           total:claude.total!=null?String(claude.total):"",
@@ -1837,13 +1929,24 @@ function LocalFileProcessor({files,payers,lmap,cats,apiKey,imports,accounts,matc
     if(splitWith.length===0){toast_("Selecione quem divide","err");return;}
     setStage("saving");
     
-    // Auto-link com o melhor match se houver
-    if(matches.length>0){
-      const bestImp=matches[0].imp;
-      const acc=accounts?.find(a=>a.id===bestImp.accountId);
-      await onSaveLinked({...result,total:v,payer,splitWith,imageBase64:b64,mimeType,account:acc?.name||"",importId:bestImp.id},bestImp.id);
-    }else{
-      await onSave({...result,total:v,payer,splitWith,imageBase64:b64,mimeType});
+    const file=files[idx];
+    const fileKey=`${file.name}_${file.size}_${file.lastModified}`;
+    
+    try{
+      // Auto-link com o melhor match se houver
+      if(matches.length>0){
+        const bestImp=matches[0].imp;
+        const acc=accounts?.find(a=>a.id===bestImp.accountId);
+        await onSaveLinked({...result,total:v,payer,splitWith,imageBase64:b64,mimeType,account:acc?.name||"",importId:bestImp.id},bestImp.id);
+      }else{
+        await onSave({...result,total:v,payer,splitWith,imageBase64:b64,mimeType});
+      }
+      // Salvou com sucesso → limpa cache deste arquivo
+      delete analysisCache.current[fileKey];
+    }catch(err){
+      toast_("⚠️ Falha ao salvar: "+err.message,"err");
+      setStage("review");
+      return;
     }
     
     if(idx+1<files.length){
@@ -1868,7 +1971,7 @@ function LocalFileProcessor({files,payers,lmap,cats,apiKey,imports,accounts,matc
 
   const handleSkip=()=>{if(!confirm("Pular este arquivo?"))return;setIdx(idx+1);};
 
-  const subtitle=`${idx+1} de ${files.length} · ${files[idx]?.name?.slice(0,30)||""}`;
+  const subtitle=`${idx+1} de ${files.length}${fromCache?" · ⚡ cache":""} · ${files[idx]?.name?.slice(0,25)||""}`;
 
   if(stage==="loading")return React.createElement(Wrap,{pb:20},
     React.createElement(Header,{title:"Carregando...",subtitle,onBack:onFinish}),
