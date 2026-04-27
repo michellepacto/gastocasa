@@ -2337,6 +2337,21 @@ function EditExpenseView({expense,imports,accounts,payers,cats,matchPenalties,on
   return React.createElement(Wrap,{pb:30},
     React.createElement(Header,{title:"Editar gasto",onBack}),
     React.createElement("div",{style:{padding:16}},
+      // Origem do pagamento — destaque no topo
+      (expense.account||expense.payer)&&React.createElement("div",{style:{padding:14,background:"linear-gradient(135deg,#1a3a2a15,#2d5a3d10)",border:"1.5px solid #2d5a3d30",borderRadius:14,marginBottom:14}},
+        React.createElement("div",{style:{fontSize:11,color:"#6b7280",fontWeight:600,marginBottom:6,textTransform:"uppercase",letterSpacing:.5}},"Origem do pagamento"),
+        React.createElement("div",{style:{display:"flex",alignItems:"center",gap:10}},
+          linkedAcc?React.createElement("div",{style:{width:36,height:36,borderRadius:10,background:linkedAcc.color+"22",border:"1.5px solid "+linkedAcc.color+"44",display:"flex",alignItems:"center",justifyContent:"center",fontSize:18,flexShrink:0}},linkedAcc.type==="card"?"💳":"🏦"):
+          React.createElement("div",{style:{width:36,height:36,borderRadius:10,background:"#f3f4f6",display:"flex",alignItems:"center",justifyContent:"center",fontSize:18,flexShrink:0}},"👤"),
+          React.createElement("div",null,
+            React.createElement("div",{style:{fontWeight:700,fontSize:15,color:"#1a1a1a"}},
+              expense.account||expense.payer
+            ),
+            expense.account&&expense.payer&&React.createElement("div",{style:{fontSize:12,color:"#6b7280",marginTop:1}},`Responsável: ${expense.payer}`)
+          )
+        )
+      ),
+      
       // Aviso de não revisado
       expense.reviewed===false&&React.createElement("div",{style:{padding:12,background:"#fef3c7",border:"1.5px solid #f59e0b",borderRadius:12,marginBottom:14,fontSize:13,color:"#78350f"}},
         React.createElement("div",{style:{fontWeight:700,marginBottom:4}},"⚠️ Esta despesa ainda não foi revisada"),
