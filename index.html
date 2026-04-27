@@ -1,2015 +1,609 @@
-<!DOCTYPE html>
-<html lang="pt-BR">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<title>GastoCasa 💰</title>
-<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Fraunces:wght@700&display=swap" rel="stylesheet">
-<style>
-* { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Plus Jakarta Sans', sans-serif; }
-body { background: #f4f1eb; color: #1a1a1a; }
-@keyframes spin { to { transform: rotate(360deg); } }
-@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.7} }
-.spin { animation: spin 1s linear infinite; }
-.pulse { animation: pulse 2s ease-in-out infinite; }
-button { cursor: pointer; font-family: inherit; }
-input, select { font-family: inherit; }
-::-webkit-scrollbar { width: 6px; height: 6px; }
-::-webkit-scrollbar-thumb { background: #ccc; border-radius: 4px; }
-table { border-spacing: 0; }
-</style>
-</head>
-<body>
-<div id="root"></div>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
-<script>
-const {useState,useEffect,useRef,useCallback,useMemo} = React;
+// ============================================================
+// GASTO CASA — Backend v7 (Importação CSV + Contas)
+// ============================================================
 
-const DEFAULT_CATS=[
-  {n:"Supermercado",i:"🛒",c:"#16a34a"},{n:"Hortifruti",i:"🥦",c:"#65a30d"},
-  {n:"Farmácia",i:"💊",c:"#d97706"},{n:"Restaurante",i:"🍽️",c:"#dc2626"},
-  {n:"Lazer",i:"🎯",c:"#7c3aed"},{n:"Transporte",i:"🚗",c:"#2563eb"},
-  {n:"Contas",i:"📄",c:"#475569"},{n:"Saúde",i:"🏥",c:"#db2777"},
-  {n:"Educação",i:"📚",c:"#ea580c"},{n:"Outros",i:"📦",c:"#94a3b8"},
+const SHEET_GASTOS = "Gastos";
+const SHEET_APRENDIZADO = "Aprendizado";
+const SHEET_CONFIG = "Config";
+const SHEET_CATEGORIAS = "Categorias";
+const SHEET_CONTAS = "Contas";
+const SHEET_IMPORTS = "ImportacoesPendentes";
+const FOLDER_NAME = "GastoCasa - Comprovantes";
+const UPLOAD_FOLDER_NAME = "upload";
+const TZ = "GMT-3";
+
+const MESES = ["Janeiro","Fevereiro","Março","Abril","Maio","Junho","Julho","Agosto","Setembro","Outubro","Novembro","Dezembro"];
+
+const DEFAULT_CATEGORIES = [
+  ["Supermercado","🛒","#16a34a"],["Hortifruti","🥦","#65a30d"],
+  ["Farmácia","💊","#d97706"],["Restaurante","🍽️","#dc2626"],
+  ["Lazer","🎯","#7c3aed"],["Transporte","🚗","#2563eb"],
+  ["Contas","📄","#475569"],["Saúde","🏥","#db2777"],
+  ["Educação","📚","#ea580c"],["Outros","📦","#94a3b8"]
 ];
-const COLOR_PALETTE=["#16a34a","#65a30d","#0891b2","#2563eb","#7c3aed","#db2777","#dc2626","#ea580c","#d97706","#475569"];
-const DOW_LABELS=["Dom","Seg","Ter","Qua","Qui","Sex","Sáb"];
-const ACCOUNT_COLORS=["#7c3aed","#16a34a","#2563eb","#dc2626","#ea580c","#0891b2","#db2777","#65a30d"];
 
-const ld=(k,d)=>{try{return JSON.parse(localStorage.getItem(k))??d;}catch{return d;}};
-const sv=(k,v)=>{try{localStorage.setItem(k,JSON.stringify(v));}catch{}};
-const brl=n=>`R$ ${(+(n)||0).toFixed(2).replace(".",",")}`;
-const brlShort=n=>{const v=+(n)||0;if(Math.abs(v)>=1000)return"R$ "+(v/1000).toFixed(1).replace(".",",")+"k";return brl(v);};
-const dtBR=d=>d?new Date(d+"T12:00").toLocaleDateString("pt-BR"):"";
-const today=()=>new Date().toISOString().split("T")[0];
-const getCat=(cats,name)=>cats.find(c=>c.n===name)||{n:name||"?",i:"📦",c:"#94a3b8"};
-const effectiveSplit=(e)=>(e.splitWith&&e.splitWith.length>0)?e.splitWith:[e.payer].filter(Boolean);
-const ymd=d=>d.toISOString().slice(0,10);
-const daysBetween=(a,b)=>Math.max(1,Math.round((b-a)/86400000)+1);
+function doGet(e)  { return route(e, "GET"); }
+function doPost(e) { return route(e, "POST"); }
 
-function periodRange(period,now){
-  const y=now.getFullYear(),m=now.getMonth();
-  if(period==="thisMonth")return {from:ymd(new Date(y,m,1)),to:ymd(new Date(y,m+1,0)),label:now.toLocaleDateString("pt-BR",{month:"long",year:"numeric"})};
-  if(period==="lastMonth"){const d=new Date(y,m-1,1);return {from:ymd(d),to:ymd(new Date(y,m,0)),label:d.toLocaleDateString("pt-BR",{month:"long",year:"numeric"})};}
-  if(period==="last3"){const d=new Date(y,m-2,1);return {from:ymd(d),to:ymd(new Date(y,m+1,0)),label:"Últimos 3 meses"};}
-  if(period==="thisYear")return {from:ymd(new Date(y,0,1)),to:ymd(new Date(y,11,31)),label:y+""};
-  if(period==="all")return {from:"1900-01-01",to:"2999-12-31",label:"Todo o período"};
-  return {from:ymd(new Date(y,m,1)),to:ymd(new Date(y,m+1,0)),label:"Este mês"};
-}
-
-function shiftPeriodPrev(period,now){
-  const y=now.getFullYear(),m=now.getMonth();
-  if(period==="thisMonth")return {from:ymd(new Date(y,m-1,1)),to:ymd(new Date(y,m,0))};
-  if(period==="lastMonth")return {from:ymd(new Date(y,m-2,1)),to:ymd(new Date(y,m-1,0))};
-  if(period==="last3")return {from:ymd(new Date(y,m-5,1)),to:ymd(new Date(y,m-2,0))};
-  if(period==="thisYear")return {from:ymd(new Date(y-1,0,1)),to:ymd(new Date(y-1,11,31))};
-  return null;
-}
-
-const inRange=(dateStr,from,to)=>!!dateStr&&dateStr>=from&&dateStr<=to;
-
-async function compress(file){
-  return new Promise(res=>{
-    const r=new FileReader();
-    r.onload=e=>{
-      const img=new Image();
-      img.onload=()=>{
-        const c=document.createElement("canvas");
-        const s=Math.min(1,1200/img.width);
-        c.width=img.width*s;c.height=img.height*s;
-        c.getContext("2d").drawImage(img,0,0,c.width,c.height);
-        res(c.toDataURL("image/jpeg",0.82).split(",")[1]);
-      };
-      img.src=e.target.result;
-    };
-    r.readAsDataURL(file);
-  });
-}
-
-async function recompressBase64(base64,mimeType){
-  return new Promise((res,rej)=>{
-    const img=new Image();
-    img.onload=()=>{
-      const c=document.createElement("canvas");
-      const s=Math.min(1,1200/img.width);
-      c.width=img.width*s;c.height=img.height*s;
-      c.getContext("2d").drawImage(img,0,0,c.width,c.height);
-      res(c.toDataURL("image/jpeg",0.82).split(",")[1]);
-    };
-    img.onerror=rej;
-    img.src="data:"+(mimeType||"image/jpeg")+";base64,"+base64;
-  });
-}
-
-async function api(url,action,params={}){
-  if(!url)throw new Error("URL não configurada");
-  if(action==="getAll"||action==="listUploads"||action==="ensureUpload"){
-    const qs=new URLSearchParams({action,t:Date.now(),...params}).toString();
-    const r=await fetch(`${url}?${qs}`);
-    if(!r.ok)throw new Error("Erro "+r.status);
-    return r.json();
-  }
-  const r=await fetch(url,{method:"POST",body:JSON.stringify({action,...params})});
-  if(!r.ok)throw new Error("Erro "+r.status);
-  return r.json();
-}
-
-async function callClaude(b64,mimeType,lmap,cats,apiKey){
-  if(!apiKey)throw new Error("Chave API não configurada");
-  const hints=Object.entries(lmap).map(([m,c])=>`"${m}"→${c}`).join("; ");
-  const isPdf=mimeType==="application/pdf";
-  const contentBlock=isPdf?{type:"document",source:{type:"base64",media_type:"application/pdf",data:b64}}:{type:"image",source:{type:"base64",media_type:mimeType||"image/jpeg",data:b64}};
-  const res=await fetch("https://api.anthropic.com/v1/messages",{
-    method:"POST",
-    headers:{"Content-Type":"application/json","x-api-key":apiKey,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
-    body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:800,messages:[{role:"user",content:[contentBlock,{type:"text",text:`Analise o comprovante e retorne APENAS JSON:\n{"merchant":"nome","total":0.00,"date":"YYYY-MM-DD","category":"cat","items":[]}\n\nCategorias: ${cats.map(c=>c.n).join(", ")}\n${hints?`\nAprendizado: ${hints}`:""}`}]}]})
-  });
-  if(!res.ok){const e=await res.text();throw new Error("API "+res.status+": "+e.slice(0,150));}
-  const d=await res.json();
-  const t=d.content?.find(b=>b.type==="text")?.text||"{}";
-  return JSON.parse(t.replace(/```\w*\n?|\n?```/g,"").trim());
-}
-
-async function suggestEmojis(name,apiKey){
-  if(!apiKey)throw new Error("Chave API não configurada");
-  const res=await fetch("https://api.anthropic.com/v1/messages",{
-    method:"POST",
-    headers:{"Content-Type":"application/json","x-api-key":apiKey,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
-    body:JSON.stringify({model:"claude-haiku-4-5-20251001",max_tokens:100,messages:[{role:"user",content:`Sugira 3 emojis para "${name}". Retorne APENAS array JSON: ["X","Y","Z"]`}]})
-  });
-  if(!res.ok)throw new Error("API "+res.status);
-  const d=await res.json();
-  const t=d.content?.find(b=>b.type==="text")?.text||"[]";
-  return JSON.parse(t.replace(/```\w*\n?|\n?```/g,"").trim());
-}
-
-// ─── CSV PARSING ─────────────────────────────────────────────
-function parseCSVLine(line){
-  const result=[];
-  let cur="",inQ=false;
-  for(let i=0;i<line.length;i++){
-    const ch=line[i];
-    if(ch==='"'){if(inQ&&line[i+1]==='"'){cur+='"';i++;}else inQ=!inQ;}
-    else if(ch===','&&!inQ){result.push(cur);cur="";}
-    else cur+=ch;
-  }
-  result.push(cur);
-  return result;
-}
-
-function parseCSV(text){
-  const lines=text.split(/\r?\n/).filter(l=>l.trim());
-  if(lines.length<2)return {headers:[],rows:[]};
-  const headers=parseCSVLine(lines[0]).map(h=>h.trim());
-  const rows=lines.slice(1).map(l=>parseCSVLine(l));
-  return {headers,rows};
-}
-
-// Detecta formato baseado nas primeiras linhas
-function detectCSVFormat(text){
-  const head=text.slice(0,500).toLowerCase();
-  const firstLine=(text.split(/\r?\n|\r/)[0]||"").toLowerCase();
-  if(firstLine.startsWith("date,title,amount"))return "nubank_card";
-  if(firstLine.startsWith("data,valor,identificador,descrição")||firstLine.startsWith("data,valor,identificador"))return "nubank_cc";
-  // Bradesco cartão: começa com "Data: DD/MM/YYYY" e tem "Situação da Fatura"
-  if(head.includes("situação da fatura")||head.includes("situacao da fatura"))return "bradesco_card";
-  // Bradesco CC: começa com "Extrato de: Ag:"
-  if(firstLine.startsWith("extrato de: ag")||head.includes("extrato de: ag:"))return "bradesco_cc";
-  return null;
-}
-
-// Parser CSV com separador customizável
-function parseCSVLineGen(line,sep){
-  const result=[];
-  let cur="",inQ=false;
-  for(let i=0;i<line.length;i++){
-    const ch=line[i];
-    if(ch==='"'){if(inQ&&line[i+1]==='"'){cur+='"';i++;}else inQ=!inQ;}
-    else if(ch===sep&&!inQ){result.push(cur);cur="";}
-    else cur+=ch;
-  }
-  result.push(cur);
-  return result;
-}
-
-// Converte valor brasileiro "1.234,56" para 1234.56
-function parseBrValue(s){
-  if(!s)return 0;
-  const cleaned=String(s).replace(/[^\d,.\-]/g,"").replace(/\./g,"").replace(",",".");
-  const v=parseFloat(cleaned);
-  return isNaN(v)?0:v;
-}
-
-// Detecta parcelas Bradesco: "TITULO X/Y" no final
-function detectInstallmentBradesco(title){
-  const m=title.match(/^(.+?)\s+(\d{1,2})\/(\d{1,2})\s*$/);
-  if(!m)return null;
-  const cur=parseInt(m[2]),tot=parseInt(m[3]);
-  // Sanity: parcela não pode ter mais de 36, current <= total
-  if(cur<1||tot<2||tot>36||cur>tot)return null;
-  return {clean:m[1].trim(),current:cur,total:tot};
-}
-
-// Parser Bradesco Cartão (fatura)
-function parseBradescoCard(text,accountId){
-  // Linhas separadas por \r (Mac) ou \n
-  const lines=text.split(/\r\n|\r|\n/);
-  const items=[];
-  
-  // Descobre ano de referência pelo header "Data: DD/MM/YYYY"
-  let refYear=new Date().getFullYear();
-  let refMonth=new Date().getMonth()+1;
-  for(const line of lines){
-    const m=line.match(/^Data:\s*(\d{2})\/(\d{2})\/(\d{4})/i);
-    if(m){refMonth=parseInt(m[2]);refYear=parseInt(m[3]);break;}
-  }
-  
-  // Detecta linhas de transação: começam com DD/MM;TITULO;...;VALOR
-  const txRegex=/^(\d{2})\/(\d{2});(.+?);([\d,.-]*);(-?[\d,.-]+)\s*;?\s*$/;
-  
-  for(const rawLine of lines){
-    const line=rawLine.trim();
-    if(!line)continue;
-    if(line.toLowerCase().startsWith("data:"))continue;
-    if(line.toLowerCase().startsWith("data;"))continue; // header
-    if(line.toLowerCase().includes("situação da fatura"))continue;
-    if(line.toLowerCase().includes("michelle r nunes"))continue;
-    if(line.toLowerCase().startsWith("total da fatura"))continue;
-    if(line.toLowerCase().startsWith("resumo"))continue;
-    if(line.toLowerCase().startsWith("saldo anterior"))continue;
-    if(line.toLowerCase().startsWith("(-)"))continue;
-    if(line.toLowerCase().startsWith("(+)"))continue;
-    if(line.toLowerCase().startsWith("(=)"))continue;
-    if(line.toLowerCase().startsWith("cotação"))continue;
-    if(line.toLowerCase().startsWith("cotacao"))continue;
-    if(line.toLowerCase().startsWith("taxas"))continue;
-    if(line.toLowerCase().startsWith("descrição;"))continue;
-    if(line.toLowerCase().includes("pagto. por deb"))continue;
-    if(line.toLowerCase().includes("custo trans"))continue;
-    if(line.toLowerCase().includes("saldo anterior"))continue;
-    
-    const m=line.match(txRegex);
-    if(!m)continue;
-    
-    const day=parseInt(m[1]);
-    const month=parseInt(m[2]);
-    let title=m[3].trim();
-    const valor=parseBrValue(m[5]);
-    
-    if(!title||valor===0)continue;
-    if(valor<0)continue; // estornos
-    if(title.toLowerCase().includes("saldo anterior"))continue;
-    if(title.toLowerCase().includes("pagto. por deb"))continue;
-    
-    // Inferir ano: se mês <= refMonth, é refYear; senão, refYear-1
-    const year=month<=refMonth?refYear:refYear-1;
-    const date=`${year}-${String(month).padStart(2,"0")}-${String(day).padStart(2,"0")}`;
-    
-    // Detectar parcela "TITULO X/Y"
-    const inst=detectInstallmentBradesco(title);
-    let totalAmount=valor;let status="pendente";let reason="";let installment="";let cleanTitle=title;
-    
-    if(inst){
-      cleanTitle=inst.clean;
-      installment=inst.current+"/"+inst.total;
-      if(inst.current===1){
-        totalAmount=+(valor*inst.total).toFixed(2);
-        reason="Compra parcelada em "+inst.total+"× (total estimado)";
-      }else{
-        status="ignorada";
-        reason="Parcela "+inst.current+"/"+inst.total+" — já contada na compra original";
-      }
+function route(e, method) {
+  try {
+    let action, params;
+    if (method === "GET") {
+      action = (e.parameter && e.parameter.action) || "getAll";
+      params = e.parameter || {};
+    } else {
+      const body = JSON.parse(e.postData.contents);
+      action = body.action;
+      params = body;
     }
-    
-    const hash=hashStr(accountId+"|"+date+"|"+cleanTitle+"|"+valor.toFixed(2));
-    items.push({accountId,date,title:cleanTitle,originalAmount:valor,totalAmount,status,reason,installment,hash});
-  }
-  return items;
-}
-
-// Parser Bradesco CC (extrato)
-function parseBradescoCC(text,accountId,payers){
-  const lines=text.split(/\r\n|\r|\n/);
-  const items=[];
-  const payerNamesLower=(payers||[]).map(p=>p.toLowerCase()).filter(Boolean);
-  
-  // Estado: tx atual sendo construída
-  let currentTx=null;
-  
-  // Tipos de histórico que IGNORAMOS automaticamente
-  const ignorePatterns=[
-    "resgate inv","resg/vencto","resg.invest","rent.inv","rent. inv","rentab.inv",
-    "apl.invest","apl. invest","aplicacao cdb","aplicação cdb","bx.ant.fin",
-    "iof util","iof s/","enc lim","encargos","custo trans",
-    "gasto c credito","gasto c. credito","gastos cartao",
-    "saldo anterior","saldo invest","saldo:",
-    "receb pagfor","devolucao pix","devolução pix",
-    "cod. lanc","código lanc"
-  ];
-  
-  // Tipos que são DESPESA potencial (precisam revisão)
-  // Padrões para extrair nome de estabelecimento da linha de detalhe
-  
-  function pushCurrent(){
-    if(!currentTx)return;
-    if(currentTx._skip){currentTx=null;return;}
-    items.push(currentTx);
-    currentTx=null;
-  }
-  
-  for(const rawLine of lines){
-    const line=rawLine.replace(/[\r\n]+$/,"");
-    if(!line)continue;
-    
-    // Skip linhas de cabeçalho/sumário
-    const lower=line.toLowerCase().trim();
-    if(lower.startsWith("extrato de:"))continue;
-    if(lower.startsWith("data;histórico"))continue;
-    if(lower.startsWith("data;historico"))continue;
-    if(lower.startsWith("os dados acima"))continue;
-    if(lower.startsWith("últimos lançamentos"))continue;
-    if(lower.startsWith("ultimos lançamentos"))continue;
-    if(lower.startsWith("saldos invest"))continue;
-    if(lower.startsWith(";total;"))continue;
-    if(lower.startsWith("total;"))continue;
-    if(/^\d{2}\/\d{2}\/\d{2};saldo anterior/i.test(line)){currentTx=null;continue;}
-    
-    const cols=parseCSVLineGen(line,";");
-    if(cols.length<2)continue;
-    
-    const dataField=(cols[0]||"").trim();
-    
-    // Linha principal: tem data DD/MM/YY
-    const dm=dataField.match(/^(\d{2})\/(\d{2})\/(\d{2})$/);
-    if(dm){
-      // Salva tx anterior se houver
-      pushCurrent();
-      
-      const date=`20${dm[3]}-${dm[2]}-${dm[1]}`;
-      const histor=(cols[1]||"").trim();
-      const credito=parseBrValue(cols[3]||"");
-      const debitoRaw=parseBrValue(cols[4]||"");
-      const debito=Math.abs(debitoRaw); // Bradesco coloca débito como negativo
-      
-      // Verifica se é tipo a ignorar
-      const histLower=histor.toLowerCase();
-      let shouldSkip=false;
-      for(const pat of ignorePatterns){
-        if(histLower.includes(pat)){shouldSkip=true;break;}
-      }
-      
-      // Saldo anterior, transferências entre própria conta, etc.
-      if(histLower==="saldo anterior")shouldSkip=true;
-      
-      // Se é crédito (entrada) sem débito, é receita → ignorar
-      const isCredit=credito>0&&debito===0;
-      const isDebit=debito>0;
-      
-      if(!isCredit&&!isDebit){
-        // Linha sem valor (provavelmente cabeçalho residual)
-        currentTx=null;
-        continue;
-      }
-      
-      currentTx={
-        accountId,date,
-        histor,
-        amount:isDebit?debito:credito,
-        isCredit,
-        detail:"",
-        _skip:shouldSkip||isCredit, // ignora créditos por padrão
-        _skipReason:shouldSkip?"Movimentação interna/encargo":"Receita / transferência recebida"
-      };
-    }else if(dataField===""&&currentTx){
-      // Linha de continuação (detalhe)
-      const detail=(cols[1]||"").trim();
-      if(detail&&!detail.startsWith("Os dados")){
-        currentTx.detail=(currentTx.detail?currentTx.detail+" ":"")+detail;
-      }
+    let result;
+    switch (action) {
+      case "getAll":         result = getAll(); break;
+      case "save":           result = saveExpense(params.expense); break;
+      case "deleteExpense":  result = deleteExpense(params.id); break;
+      case "updateLearning": result = updateLearning(params.merchant, params.category); break;
+      case "deleteLearning": result = deleteLearning(params.merchant); break;
+      case "addPayer":       result = addPayer(params.name); break;
+      case "deletePayer":    result = deletePayer(params.name); break;
+      case "addCategory":    result = addCategory(params.category); break;
+      case "deleteCategory": result = deleteCategory(params.name); break;
+      case "listUploads":    result = listUploads(); break;
+      case "getUploadFile":  result = getUploadFile(params.id); break;
+      case "deleteUpload":   result = deleteUpload(params.id); break;
+      // ─── NOVO: Contas e Importações ─────────────────
+      case "addAccount":     result = addAccount(params.account); break;
+      case "deleteAccount":  result = deleteAccount(params.id); break;
+      case "addImports":     result = addImports(params.imports); break;
+      case "updateImport":   result = updateImport(params.id, params.updates); break;
+      case "deleteImport":   result = deleteImport(params.id); break;
+      case "launchImports":  result = launchImports(params.ids, params.payerByAccount, params.accountNameById); break;
+      case "linkExpense":    result = linkExpenseToImport(params.expenseId, params.importId, params.accountName); break;
+      case "unlinkExpense":  result = unlinkExpense(params.expenseId); break;
+      case "ping":           result = { ok: true, time: new Date().toISOString() }; break;
+      default: result = { ok: false, error: "Ação desconhecida: " + action };
     }
+    return json(result);
+  } catch (err) {
+    return json({ ok: false, error: err.message });
   }
-  pushCurrent();
-  
-  // Agora classifica/transforma cada tx em formato final
-  return items.map(tx=>{
-    // Construir título legível
-    let title=tx.histor;
-    let reason="";
-    let status="pendente";
-    
-    const histLower=tx.histor.toLowerCase();
-    const detailLower=tx.detail.toLowerCase();
-    
-    // Se já marcado como skip
-    if(tx._skip){
-      status="ignorada";
-      reason=tx._skipReason||"Ignorada automaticamente";
-      title=tx.detail||tx.histor;
-    }else{
-      // Pix transfers: extrair destinatário
-      if(histLower.includes("pix")){
-        // Padrão: "Des: NOME DA PESSOA DD/MM"
-        const desMatch=tx.detail.match(/Des:\s*(.+?)(?:\s+\d{2}\/\d{2})?$/i);
-        if(desMatch){
-          title=desMatch[1].trim();
-          // Verifica se é pix entre cadastrados
-          const titleLower=title.toLowerCase();
-          for(const pn of payerNamesLower){
-            if(pn&&titleLower.includes(pn)){
-              status="ignorada";
-              reason="Pix para pessoa cadastrada ("+pn+")";
-              break;
-            }
-          }
-          // Pix recebido (Rem) — não deveria chegar aqui mas por segurança
-          const remMatch=tx.detail.match(/Rem:\s*(.+?)(?:\s+\d{2}\/\d{2})?$/i);
-          if(remMatch&&!desMatch){
-            status="ignorada";
-            reason="Pix recebido (receita)";
-          }
-        }else{
-          title=tx.detail||tx.histor;
-        }
-      }
-      // Visa Electron, Comp Debit App: detalhe é o estabelecimento
-      else if(histLower.includes("visa electron")||histLower.includes("comp debit")||histLower.includes("cartao visa")){
-        title=tx.detail||tx.histor;
-      }
-      // Contas (luz, gás, telefone, TV)
-      else if(histLower.includes("conta de luz")||histLower.includes("conta de gas")||histLower.includes("conta telefone")||histLower.includes("tv p/assinatura")){
-        title=tx.histor.replace(/conta\s+de\s+/i,"").replace(/tv p\/assinatura/i,"TV").trim();
-        if(tx.detail)title+=" - "+tx.detail.split("-")[0].trim();
-      }
-      // Pagamentos cobrança
-      else if(histLower.includes("pagto cobranca")||histLower.includes("pagto. cobranca")){
-        title=tx.detail||tx.histor;
-      }
-      // Financiamentos
-      else if(histLower.includes("prest fin imob")){
-        title="Financiamento Imobiliário";
-      }
-      else if(histLower.includes("parc cred pess")){
-        title="Empréstimo - Parcela";
-      }
-      else{
-        title=tx.detail||tx.histor;
-      }
-    }
-    
-    // Limpa título
-    title=title.replace(/\s+/g," ").trim();
-    if(title.length>80)title=title.slice(0,80);
-    
-    const hash=hashStr(accountId+"|"+tx.date+"|"+title.slice(0,40)+"|"+tx.amount.toFixed(2));
-    return {
-      accountId,
-      date:tx.date,
-      title,
-      originalAmount:tx.amount,
-      totalAmount:tx.amount,
-      status,
-      reason,
-      installment:"",
-      hash
-    };
-  });
 }
 
-// Hash simples para dedupe
-function hashStr(s){
-  let h=0;
-  for(let i=0;i<s.length;i++)h=((h<<5)-h+s.charCodeAt(i))|0;
-  return Math.abs(h).toString(36);
+function json(obj) {
+  return ContentService.createTextOutput(JSON.stringify(obj))
+    .setMimeType(ContentService.MimeType.JSON);
 }
 
-// Detecta " - Parcela X/Y" no título
-function detectInstallment(title){
-  const m=title.match(/^(.+?)\s*-\s*Parcela\s+(\d+)\/(\d+)$/i);
-  if(!m)return null;
-  return {clean:m[1].trim(),current:parseInt(m[2]),total:parseInt(m[3])};
-}
+// ─── GETALL (agora também retorna contas e importações) ────
+function getAll() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
 
-// Parser CSV cartão Nubank
-// Aplica lógica de parcelas: Parcela 1/N → cria com valor*N; Parcelas 2+ → marcadas como "parcela_subsequente"
-function parseNubankCard(text,accountId){
-  const {rows}=parseCSV(text);
-  const items=[];
-  for(const r of rows){
-    if(r.length<3)continue;
-    const date=r[0]?.trim();
-    const title=r[1]?.trim();
-    const amount=parseFloat(r[2]);
-    if(!date||!title||isNaN(amount))continue;
-    if(amount<0)continue; // estornos: ignora
-    
-    const inst=detectInstallment(title);
-    let totalAmount=amount;
-    let status="pendente";
-    let reason="";
-    let installment="";
-    let cleanTitle=title;
-    
-    if(inst){
-      cleanTitle=inst.clean;
-      installment=inst.current+"/"+inst.total;
-      if(inst.current===1){
-        // Compra original → calcular total (estimativa)
-        totalAmount=+(amount*inst.total).toFixed(2);
-        reason="Compra parcelada em "+inst.total+"× (total estimado)";
-      }else{
-        // Parcela seguinte → não lançar como nova despesa
-        status="ignorada";
-        reason="Parcela "+inst.current+"/"+inst.total+" — já contada na compra original";
-      }
-    }
-    
-    const hash=hashStr(accountId+"|"+date+"|"+cleanTitle+"|"+amount.toFixed(2));
-    items.push({accountId,date,title:cleanTitle,originalAmount:amount,totalAmount,status,reason,installment,hash});
-  }
-  return items;
-}
-
-// Parser CC Nubank
-function parseNubankCC(text,accountId,payers){
-  const {rows}=parseCSV(text);
-  const items=[];
-  const payerNamesLower=(payers||[]).map(p=>p.toLowerCase());
-  
-  for(const r of rows){
-    if(r.length<4)continue;
-    const dateBR=r[0]?.trim(); // DD/MM/YYYY
-    const valor=parseFloat(r[1]);
-    const desc=r[3]?.trim();
-    if(!dateBR||isNaN(valor)||!desc)continue;
-    
-    // Converte data DD/MM/YYYY → YYYY-MM-DD
-    const dm=dateBR.match(/^(\d{2})\/(\d{2})\/(\d{4})/);
-    if(!dm)continue;
-    const date=`${dm[3]}-${dm[2]}-${dm[1]}`;
-    
-    const isOutgoing=valor<0;
-    const absValor=Math.abs(valor);
-    
-    // Filtros automáticos
-    let status="pendente";
-    let reason="";
-    
-    const descLower=desc.toLowerCase();
-    
-    if(descLower.includes("pagamento de fatura")){
-      status="ignorada";
-      reason="Pagamento de fatura — já está nas faturas do cartão";
-    }else if(!isOutgoing){
-      // Entrada (Pix recebido, transferência recebida)
-      status="ignorada";
-      reason="Receita / transferência recebida";
-    }else{
-      // Saída — verifica se é Pix entre cadastrados
-      const isPix=descLower.includes("pix");
-      if(isPix){
-        for(const pn of payerNamesLower){
-          if(pn&&descLower.includes(pn)){
-            status="ignorada";
-            reason="Pix para pessoa cadastrada ("+pn+")";
-            break;
-          }
-        }
-      }
-    }
-    
-    // Limpa título
-    let title=desc;
-    const pixDes=desc.match(/DES:\s*(.+?)(?:\s+\d{2}\/\d{2})?$/i);
-    if(pixDes)title=pixDes[1].trim();
-    title=title.replace(/\s+\d{2}\/\d{2}$/,"").trim();
-    if(title.length>80)title=title.slice(0,80);
-    
-    const hash=hashStr(accountId+"|"+date+"|"+desc.slice(0,40)+"|"+absValor.toFixed(2));
-    items.push({
-      accountId,date,title,
-      originalAmount:absValor,
-      totalAmount:absValor,
-      status,reason,installment:"",hash
+  const gSheet = getGastosSheet(ss);
+  const gData = gSheet.getDataRange().getValues();
+  const expenses = [];
+  for (let i = 1; i < gData.length; i++) {
+    const r = gData[i];
+    if (!r[0]) continue;
+    expenses.push({
+      id: String(r[0]),
+      date: r[1] instanceof Date ? Utilities.formatDate(r[1], TZ, "yyyy-MM-dd") : String(r[1] || ""),
+      merchant: String(r[2] || ""),
+      category: String(r[3] || ""),
+      total: Number(r[4]) || 0,
+      payer: String(r[5] || ""),
+      items: r[6] ? String(r[6]).split(", ").filter(Boolean) : [],
+      driveUrl: String(r[7] || ""),
+      at: r[8] instanceof Date ? r[8].toISOString() : String(r[8] || ""),
+      splitWith: r[9] ? String(r[9]).split(", ").filter(Boolean) : [],
+      account: String(r[10] || ""),
+      importId: String(r[11] || "")
     });
   }
-  return items;
-}
 
-// Detecção de duplicatas vs expenses existentes
-function findDuplicateExpense(imp,expenses){
-  const tol=1.0; // R$ 1
-  const titleLower=(imp.title||"").toLowerCase();
-  for(const e of expenses){
-    if(e.date!==imp.date)continue;
-    if(Math.abs((+e.total||0)-imp.totalAmount)>tol)continue;
-    const merchLower=(e.merchant||"").toLowerCase();
-    if(!merchLower||!titleLower)continue;
-    // Match: contém uma palavra significativa em comum
-    const words1=titleLower.split(/\s+/).filter(w=>w.length>3);
-    const words2=merchLower.split(/\s+/).filter(w=>w.length>3);
-    for(const w of words1){
-      if(words2.includes(w))return e;
-    }
-  }
-  return null;
-}
+  const aSheet = getAprendizadoSheet(ss);
+  const aData = aSheet.getDataRange().getValues();
+  const learning = {};
+  for (let i = 1; i < aData.length; i++) if (aData[i][0]) learning[String(aData[i][0])] = String(aData[i][1] || "");
 
-// ─── RECONCILIATION ─────────────────────────────────────────
-// Calcula score de match entre uma despesa e um import (0-100)
-function matchScore(expense,imp){
-  if(!expense||!imp)return 0;
-  
-  // 1. Valor (crítico, ±R$1)
-  const valDiff=Math.abs((+expense.total||0)-(+imp.totalAmount||0));
-  if(valDiff>1.0)return 0; // sem chance se valor diverge muito
-  const valScore=valDiff<0.01?40:valDiff<0.50?35:25;
-  
-  // 2. Data (±3 dias)
-  if(!expense.date||!imp.date)return 0;
-  const d1=new Date(expense.date+"T12:00");
-  const d2=new Date(imp.date+"T12:00");
-  const dayDiff=Math.abs((d1-d2)/86400000);
-  if(dayDiff>3)return 0;
-  const dateScore=dayDiff<0.5?30:dayDiff<=1?25:dayDiff<=2?15:8;
-  
-  // 3. Estabelecimento (palavras em comum)
-  const normalize=s=>(s||"").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/[^a-z0-9 ]/g," ").replace(/\s+/g," ").trim();
-  const m1=normalize(expense.merchant);
-  const m2=normalize(imp.title);
-  if(!m1||!m2)return valScore+dateScore;
-  const words1=m1.split(/\s+/).filter(w=>w.length>2);
-  const words2=m2.split(/\s+/).filter(w=>w.length>2);
-  let common=0;
-  for(const w of words1){
-    if(words2.some(w2=>w2.includes(w)||w.includes(w2)))common++;
-  }
-  const nameScore=common===0?0:common===1?15:30;
-  
-  return valScore+dateScore+nameScore;
-}
+  const cSheet = getConfigSheet(ss);
+  const cData = cSheet.getDataRange().getValues();
+  const payers = [];
+  for (let i = 1; i < cData.length; i++) if (cData[i][0]) payers.push(String(cData[i][0]));
 
-// Busca matches em uma lista de imports para uma expense
-// Retorna lista ordenada por score (descendente)
-function findImportMatches(expense,imports,minScore=50){
-  if(!expense||!imports)return [];
-  const matches=[];
-  for(const imp of imports){
-    if(imp.status==="vinculada"||imp.status==="lancada")continue;
-    if(imp.status==="ignorada")continue;
-    const score=matchScore(expense,imp);
-    if(score>=minScore)matches.push({imp,score});
-  }
-  matches.sort((a,b)=>b.score-a.score);
-  return matches;
-}
+  const catSheet = getCategoriesSheet(ss);
+  const catData = catSheet.getDataRange().getValues();
+  const categories = [];
+  for (let i = 1; i < catData.length; i++) if (catData[i][0]) categories.push({ n: String(catData[i][0]), i: String(catData[i][1] || "📦"), c: String(catData[i][2] || "#94a3b8") });
 
-// Busca matches em uma lista de expenses para um import
-function findExpenseMatches(imp,expenses,minScore=50){
-  if(!imp||!expenses)return [];
-  const matches=[];
-  for(const exp of expenses){
-    if(exp.importId)continue; // já vinculado
-    const score=matchScore(exp,imp);
-    if(score>=minScore)matches.push({exp,score});
-  }
-  matches.sort((a,b)=>b.score-a.score);
-  return matches;
-}
-
-function isStrongMatch(score){return score>=80;}
-
-const Toast=({t})=>React.createElement("div",{style:{position:"fixed",top:16,left:"50%",transform:"translateX(-50%)",background:t.type==="err"?"#dc2626":"#1a3a2a",color:"#fff",padding:"10px 22px",borderRadius:24,zIndex:9999,fontSize:14,fontWeight:600,boxShadow:"0 4px 20px rgba(0,0,0,.25)",maxWidth:400,textAlign:"center"}},t.msg);
-const Wrap=({children,pb=80,wide=false})=>React.createElement("div",{style:{maxWidth:wide?1200:430,margin:"0 auto",minHeight:"100vh",background:"#f4f1eb",paddingBottom:pb,position:"relative"}},children);
-const Card=({title,children,style={},onClick,right})=>React.createElement("div",{style:{background:"#fff",borderRadius:20,padding:16,marginBottom:14,boxShadow:"0 1px 8px rgba(0,0,0,.06)",cursor:onClick?"pointer":"default",...style},onClick},
-  title&&React.createElement("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}},React.createElement("div",{style:{fontWeight:700,fontSize:13,color:"#374151"}},title),right),
-  children
-);
-
-const ExpRow=({e,cats,accounts})=>{
-  const cat=getCat(cats,e.category);
-  const split=effectiveSplit(e);
-  const isPdf=e.driveUrl&&/\.pdf(\?|$)/i.test(e.driveUrl);
-  const account=e.account&&accounts?accounts.find(a=>a.name===e.account):null;
-  const linked=!!e.importId;
-  return React.createElement("div",{style:{display:"flex",alignItems:"center",gap:12,padding:"11px 0",borderBottom:"1px solid #f0ede6",borderLeft:account?`4px solid ${account.color}`:"none",paddingLeft:account?10:0,marginLeft:account?-10:0}},
-    React.createElement("div",{style:{width:40,height:40,borderRadius:13,background:cat.c+"20",display:"flex",alignItems:"center",justifyContent:"center",fontSize:18,flexShrink:0}},cat.i),
-    React.createElement("div",{style:{flex:1,minWidth:0}},
-      React.createElement("div",{style:{fontWeight:600,fontSize:13,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",display:"flex",alignItems:"center",gap:4}},
-        linked&&React.createElement("span",{title:"Vinculado a lançamento bancário",style:{color:"#16a34a",fontSize:11,flexShrink:0}},"🔗"),
-        e.merchant||"Sem nome"
-      ),
-      React.createElement("div",{style:{fontSize:11,color:"#6b7280"}},`${dtBR(e.date)} · ${e.payer}${split.length>1?` · ÷${split.length}`:""}${e.account?` · ${e.account.split(" ")[0]}`:""}${e.driveUrl?(isPdf?" · 📄":" · 📎"):""}`)
-    ),
-    React.createElement("div",{style:{fontWeight:700,fontSize:14,flexShrink:0,textAlign:"right"}},
-      React.createElement("div",null,brl(e.total)),
-      split.length>1&&React.createElement("div",{style:{fontSize:10,color:"#9ca3af",fontWeight:500}},brl(e.total/split.length)+"/p")
-    )
-  );
-};
-
-const BackBtn=({onClick})=>React.createElement("button",{onClick,style:{background:"rgba(255,255,255,.2)",border:"none",borderRadius:12,padding:"7px 14px",color:"#fff",fontSize:14,fontWeight:600}},"← Voltar");
-const Label=({children})=>React.createElement("div",{style:{fontSize:12,fontWeight:600,color:"#6b7280",marginBottom:4,marginTop:10}},children);
-const InputEl=({value,onChange,...props})=>React.createElement("input",{value,onChange:e=>onChange(e.target.value),...props,style:{width:"100%",padding:"10px 12px",borderRadius:12,border:"1.5px solid #e5e7eb",fontSize:14,outline:"none",...(props.style||{})}});
-const SelectEl=({value,onChange,children,...props})=>React.createElement("select",{value,onChange:e=>onChange(e.target.value),...props,style:{width:"100%",padding:"10px 12px",borderRadius:12,border:"1.5px solid #e5e7eb",fontSize:14,outline:"none",background:"#fff",...(props.style||{})}},children);
-const Spinner=({size=20,color="#fff"})=>React.createElement("div",{className:"spin",style:{width:size,height:size,border:`2.5px solid ${color}30`,borderTopColor:color,borderRadius:"50%",flexShrink:0}});
-
-const Header=({title,onBack,subtitle,right,green=true})=>React.createElement("div",{style:{background:green?"linear-gradient(135deg,#1a3a2a,#2d5a3d)":"#fff",padding:"20px 16px 22px",borderRadius:"0 0 28px 28px",marginBottom:4}},
-  React.createElement("div",{style:{display:"flex",alignItems:"center",justifyContent:"space-between",gap:8}},
-    React.createElement("div",{style:{display:"flex",alignItems:"center",gap:12,flex:1,minWidth:0}},
-      onBack&&React.createElement(BackBtn,{onClick:onBack}),
-      React.createElement("div",{style:{minWidth:0,flex:1}},
-        React.createElement("div",{style:{color:green?"#fff":"#1a1a1a",fontWeight:700,fontSize:18,fontFamily:"Fraunces"}},title),
-        subtitle&&React.createElement("div",{style:{color:green?"rgba(255,255,255,.7)":"#6b7280",fontSize:12,marginTop:2}},subtitle)
-      )
-    ),right
-  )
-);
-
-const PreviewBox=({imageUrl,pdfFilename})=>{
-  if(imageUrl)return React.createElement("div",{style:{marginBottom:14,borderRadius:16,overflow:"hidden",height:130}},React.createElement("img",{src:imageUrl,style:{width:"100%",height:"100%",objectFit:"cover"}}));
-  if(pdfFilename)return React.createElement("div",{style:{marginBottom:14,borderRadius:16,padding:24,background:"linear-gradient(135deg,#fee2e2,#fecaca)",display:"flex",alignItems:"center",gap:14}},
-    React.createElement("div",{style:{fontSize:48}},"📄"),
-    React.createElement("div",{style:{flex:1,minWidth:0}},React.createElement("div",{style:{fontWeight:700,fontSize:14,color:"#991b1b",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}},pdfFilename),React.createElement("div",{style:{fontSize:11,color:"#7f1d1d",marginTop:2}},"Documento PDF"))
-  );
-  return null;
-};
-
-const Pill=({active,onClick,children,color="#1a3a2a"})=>React.createElement("button",{onClick,style:{padding:"6px 14px",borderRadius:20,border:"none",whiteSpace:"nowrap",background:active?color:"#fff",color:active?"#fff":"#374151",fontWeight:600,fontSize:12,cursor:"pointer"}},children);
-
-const KPI=({label,value,sub,color})=>React.createElement("div",{style:{flex:1,minWidth:0,padding:12,background:"#fff",borderRadius:14,boxShadow:"0 1px 8px rgba(0,0,0,.05)"}},
-  React.createElement("div",{style:{fontSize:10,color:"#6b7280",fontWeight:600,marginBottom:2,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}},label),
-  React.createElement("div",{style:{fontSize:18,fontWeight:800,color:color||"#1a1a1a",lineHeight:1.1,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}},value),
-  sub&&React.createElement("div",{style:{fontSize:10,color:"#9ca3af",marginTop:2}},sub)
-);
-
-// MatchSuggestion: mostra sugestões de vínculo
-const MatchSuggestion=({matches,accounts,onSelect,onSkip,title="🔗 Encontramos lançamentos bancários parecidos:"})=>{
-  if(!matches||matches.length===0)return null;
-  return React.createElement("div",{style:{padding:14,background:"#f0fdf4",border:"1.5px solid #16a34a",borderRadius:14,marginBottom:14}},
-    React.createElement("div",{style:{fontWeight:700,fontSize:13,color:"#166534",marginBottom:10}},title),
-    React.createElement("div",{style:{display:"flex",flexDirection:"column",gap:8}},
-      matches.slice(0,3).map(({imp,score})=>{
-        const acc=accounts.find(a=>a.id===imp.accountId);
-        const strong=isStrongMatch(score);
-        return React.createElement("div",{key:imp.id,onClick:()=>onSelect(imp),style:{padding:10,background:"#fff",borderRadius:10,border:"1.5px solid "+(strong?"#16a34a":"#bbf7d0"),cursor:"pointer",display:"flex",alignItems:"center",gap:10}},
-          React.createElement("div",{style:{flex:1,minWidth:0}},
-            React.createElement("div",{style:{display:"flex",alignItems:"center",gap:6,marginBottom:3}},
-              acc&&React.createElement("div",{style:{width:8,height:8,borderRadius:"50%",background:acc.color,flexShrink:0}}),
-              React.createElement("div",{style:{fontWeight:700,fontSize:13,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}},imp.title),
-              strong&&React.createElement("span",{style:{fontSize:9,padding:"1px 6px",borderRadius:6,background:"#16a34a",color:"#fff",fontWeight:700}},"Match forte")
-            ),
-            React.createElement("div",{style:{fontSize:11,color:"#6b7280"}},`${dtBR(imp.date)} · ${acc?acc.name:"?"} · ${brl(imp.totalAmount)}${imp.installment?` · 📦 ${imp.installment}`:""}`)
-          ),
-          React.createElement("button",{onClick:(e)=>{e.stopPropagation();onSelect(imp);},style:{padding:"6px 12px",borderRadius:10,border:"none",background:"#16a34a",color:"#fff",fontWeight:700,fontSize:12,cursor:"pointer",whiteSpace:"nowrap"}},"✓ Vincular")
-        );
-      })
-    ),
-    onSkip&&React.createElement("button",{onClick:onSkip,style:{marginTop:10,width:"100%",padding:8,borderRadius:10,border:"1.5px solid #e5e7eb",background:"#fff",color:"#6b7280",fontWeight:600,fontSize:12,cursor:"pointer"}},"Pular — salvar sem vincular")
-  );
-};
-
-// ─── IMPORT VIEW ─────────────────────────────────────────────
-function ImportView({accounts,imports,expenses,cats,payers,lmap,scriptUrl,onAddAccount,onDeleteAccount,onUploadCsv,onUpdateImport,onDeleteImport,onLaunchImports,onBack,toast_}){
-  const [tab,setTab]=useState("list");
-  const [selectedAccount,setSelectedAccount]=useState("all");
-  const [filterStatus,setFilterStatus]=useState("pendente");
-  const [selectedIds,setSelectedIds]=useState(new Set());
-  const [busy,setBusy]=useState(false);
-
-  // Detecta duplicatas dinamicamente
-  const importsWithDup=useMemo(()=>{
-    return imports.map(imp=>{
-      if(imp.status!=="pendente")return imp;
-      const dup=findDuplicateExpense(imp,expenses);
-      if(dup)return {...imp,_duplicate:dup};
-      return imp;
+  const accSheet = getContasSheet(ss);
+  const accData = accSheet.getDataRange().getValues();
+  const accounts = [];
+  for (let i = 1; i < accData.length; i++) {
+    if (!accData[i][0]) continue;
+    accounts.push({
+      id: String(accData[i][0]),
+      name: String(accData[i][1] || ""),
+      type: String(accData[i][2] || "card"),
+      payer: String(accData[i][3] || ""),
+      bank: String(accData[i][4] || ""),
+      color: String(accData[i][5] || "#7c3aed")
     });
-  },[imports,expenses]);
-
-  // Aplica filtros
-  const filtered=importsWithDup.filter(imp=>{
-    if(selectedAccount!=="all"&&imp.accountId!==selectedAccount)return false;
-    if(filterStatus==="all")return true;
-    if(filterStatus==="duplicada")return !!imp._duplicate;
-    return imp.status===filterStatus;
-  }).sort((a,b)=>(b.date||"").localeCompare(a.date||""));
-
-  // Estatísticas
-  const stats={
-    total:importsWithDup.length,
-    pendente:importsWithDup.filter(i=>i.status==="pendente").length,
-    lancada:importsWithDup.filter(i=>i.status==="lancada").length,
-    ignorada:importsWithDup.filter(i=>i.status==="ignorada").length,
-    duplicada:importsWithDup.filter(i=>!!i._duplicate).length
-  };
-
-  const accountById=Object.fromEntries(accounts.map(a=>[a.id,a]));
-  const allFilteredIds=filtered.map(i=>i.id);
-  const allSelected=allFilteredIds.length>0&&allFilteredIds.every(id=>selectedIds.has(id));
-
-  const toggleSelect=(id)=>{
-    const ns=new Set(selectedIds);
-    if(ns.has(id))ns.delete(id);else ns.add(id);
-    setSelectedIds(ns);
-  };
-  const toggleAll=()=>{
-    if(allSelected)setSelectedIds(new Set());
-    else setSelectedIds(new Set(allFilteredIds));
-  };
-
-  // ─── AÇÕES ───────────────────────────────────────────
-  const launchOne=async(imp)=>{
-    if(!imp.category){toast_("Defina uma categoria primeiro","err");return;}
-    if(imp._duplicate){if(!confirm("Esta transação parece duplicar um gasto existente. Lançar mesmo assim?"))return;}
-    setBusy(true);
-    await onLaunchImports([imp.id]);
-    setBusy(false);
-    setSelectedIds(new Set([...selectedIds].filter(id=>id!==imp.id)));
-  };
-  const launchSelected=async()=>{
-    const ids=[...selectedIds];
-    if(ids.length===0){toast_("Selecione pelo menos uma","err");return;}
-    const items=ids.map(id=>importsWithDup.find(i=>i.id===id)).filter(Boolean);
-    const semCat=items.filter(i=>!i.category);
-    if(semCat.length>0){toast_(`${semCat.length} sem categoria — preencha primeiro`,"err");return;}
-    if(!confirm(`Lançar ${ids.length} despesa(s)?`))return;
-    setBusy(true);
-    await onLaunchImports(ids);
-    setBusy(false);
-    setSelectedIds(new Set());
-  };
-  const launchAllPending=async()=>{
-    const ids=filtered.filter(i=>i.status==="pendente"&&!i._duplicate).map(i=>i.id);
-    if(ids.length===0){toast_("Nenhuma pendente sem duplicata","err");return;}
-    const semCat=ids.filter(id=>{const i=importsWithDup.find(x=>x.id===id);return !i.category;});
-    if(semCat.length>0){toast_(`${semCat.length} sem categoria — preencha primeiro`,"err");return;}
-    if(!confirm(`Lançar TODAS as ${ids.length} pendentes (excluindo duplicatas)?`))return;
-    setBusy(true);
-    await onLaunchImports(ids);
-    setBusy(false);
-  };
-
-  const setStatus=async(id,status)=>{
-    await onUpdateImport(id,{status});
-  };
-  const setCategoryFor=async(id,category)=>{
-    await onUpdateImport(id,{category});
-  };
-
-  // ─── RENDER ──────────────────────────────────────────
-  const StatusBadge=({s,dup})=>{
-    if(dup)return React.createElement("span",{style:{padding:"3px 8px",borderRadius:8,fontSize:10,fontWeight:700,background:"#fef3c7",color:"#92400e",whiteSpace:"nowrap"}},"⚠️ Duplicada");
-    const map={pendente:["⏳ Pendente","#dbeafe","#1e40af"],lancada:["✅ Lançada","#dcfce7","#166534"],ignorada:["🔇 Ignorada","#f3f4f6","#6b7280"]};
-    const [label,bg,fg]=map[s]||["?","#fff","#000"];
-    return React.createElement("span",{style:{padding:"3px 8px",borderRadius:8,fontSize:10,fontWeight:700,background:bg,color:fg,whiteSpace:"nowrap"}},label);
-  };
-
-  const renderListTab=()=>{
-    if(accounts.length===0)return React.createElement(Card,null,
-      React.createElement("div",{style:{textAlign:"center",padding:30,color:"#6b7280"}},
-        React.createElement("div",{style:{fontSize:48,marginBottom:8}},"💳"),
-        React.createElement("div",{style:{fontWeight:600,marginBottom:4}},"Nenhuma conta cadastrada"),
-        React.createElement("div",{style:{fontSize:13}},"Cadastre suas contas e cartões na aba 'Contas' antes de importar")
-      )
-    );
-
-    return React.createElement(React.Fragment,null,
-      // Filtros
-      React.createElement(Card,null,
-        React.createElement("div",{style:{display:"flex",gap:10,flexWrap:"wrap",alignItems:"center"}},
-          React.createElement("div",{style:{flex:"0 0 220px"}},
-            React.createElement(SelectEl,{value:selectedAccount,onChange:setSelectedAccount},
-              React.createElement("option",{value:"all"},"Todas as contas"),
-              accounts.map(a=>React.createElement("option",{key:a.id,value:a.id},a.name))
-            )
-          ),
-          React.createElement("div",{style:{display:"flex",gap:6,flexWrap:"wrap",flex:1}},
-            [["pendente","⏳ Pendentes",stats.pendente],["all","📋 Todas",stats.total],["lancada","✅ Lançadas",stats.lancada],["ignorada","🔇 Ignoradas",stats.ignorada],["duplicada","⚠️ Duplicatas",stats.duplicada]].map(([k,l,n])=>
-              React.createElement(Pill,{key:k,active:filterStatus===k,onClick:()=>setFilterStatus(k),color:k==="pendente"?"#2563eb":k==="lancada"?"#16a34a":k==="ignorada"?"#6b7280":k==="duplicada"?"#f59e0b":"#1a3a2a"},`${l} (${n})`)
-            )
-          )
-        )
-      ),
-      
-      // Botões de ação
-      filterStatus==="pendente"&&React.createElement("div",{style:{display:"flex",gap:8,marginBottom:14,flexWrap:"wrap"}},
-        React.createElement("button",{onClick:launchSelected,disabled:busy||selectedIds.size===0,style:{padding:"10px 18px",borderRadius:12,border:"none",background:selectedIds.size>0?"#2563eb":"#e5e7eb",color:selectedIds.size>0?"#fff":"#9ca3af",fontWeight:700,fontSize:13,cursor:selectedIds.size>0?"pointer":"not-allowed"}},`✓ Lançar selecionadas (${selectedIds.size})`),
-          React.createElement("button",{onClick:launchAllPending,disabled:busy,style:{padding:"10px 18px",borderRadius:12,border:"none",background:"#16a34a",color:"#fff",fontWeight:700,fontSize:13,cursor:"pointer"}},`🚀 Lançar todas pendentes (${filtered.filter(i=>i.status==="pendente"&&!i._duplicate).length})`)
-      ),
-
-      // Tabela
-      React.createElement(Card,{style:{padding:0,overflow:"hidden"}},
-        filtered.length===0?React.createElement("div",{style:{textAlign:"center",padding:40,color:"#9ca3af"}},
-          React.createElement("div",{style:{fontSize:36,marginBottom:8}},"📭"),
-          React.createElement("div",null,"Nenhuma transação no filtro atual")
-        ):React.createElement("div",{style:{overflow:"auto"}},
-          React.createElement("table",{style:{width:"100%",borderCollapse:"collapse",fontSize:13}},
-            React.createElement("thead",null,
-              React.createElement("tr",{style:{background:"#f9fafb",borderBottom:"2px solid #e5e7eb"}},
-                React.createElement("th",{style:{padding:"10px 8px",textAlign:"left",width:30}},
-                  filterStatus==="pendente"&&React.createElement("input",{type:"checkbox",checked:allSelected,onChange:toggleAll})
-                ),
-                React.createElement("th",{style:{padding:"10px 8px",textAlign:"left",width:90}},"Status"),
-                React.createElement("th",{style:{padding:"10px 8px",textAlign:"left",width:90}},"Data"),
-                React.createElement("th",{style:{padding:"10px 8px",textAlign:"left",width:140}},"Conta"),
-                React.createElement("th",{style:{padding:"10px 8px",textAlign:"left"}},"Estabelecimento"),
-                React.createElement("th",{style:{padding:"10px 8px",textAlign:"left",width:160}},"Categoria"),
-                React.createElement("th",{style:{padding:"10px 8px",textAlign:"right",width:100}},"Valor"),
-                React.createElement("th",{style:{padding:"10px 8px",textAlign:"center",width:200}},"Ações")
-              )
-            ),
-            React.createElement("tbody",null,
-              filtered.map(imp=>{
-                const acc=accountById[imp.accountId];
-                const sugCat=imp.category||lmap[imp.title]||"";
-                return React.createElement("tr",{key:imp.id,style:{borderBottom:"1px solid #f0ede6",background:imp._duplicate?"#fffbeb":"#fff"}},
-                  React.createElement("td",{style:{padding:"8px"}},
-                    imp.status==="pendente"&&React.createElement("input",{type:"checkbox",checked:selectedIds.has(imp.id),onChange:()=>toggleSelect(imp.id)})
-                  ),
-                  React.createElement("td",{style:{padding:"8px"}},React.createElement(StatusBadge,{s:imp.status,dup:imp._duplicate})),
-                  React.createElement("td",{style:{padding:"8px",whiteSpace:"nowrap",fontSize:12}},dtBR(imp.date)),
-                  React.createElement("td",{style:{padding:"8px",fontSize:12}},
-                    acc?React.createElement("div",{style:{display:"flex",alignItems:"center",gap:6}},
-                      React.createElement("div",{style:{width:8,height:8,borderRadius:"50%",background:acc.color,flexShrink:0}}),
-                      React.createElement("div",{style:{minWidth:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}},acc.name)
-                    ):"—"
-                  ),
-                  React.createElement("td",{style:{padding:"8px",fontSize:12}},
-                    React.createElement("div",{style:{fontWeight:600}},imp.title),
-                    imp.installment&&React.createElement("div",{style:{fontSize:10,color:"#7c3aed",marginTop:2}},`📦 Parcela ${imp.installment}`),
-                    imp.reason&&React.createElement("div",{style:{fontSize:10,color:"#9ca3af",marginTop:2,fontStyle:"italic"}},imp.reason),
-                    imp._duplicate&&React.createElement("div",{style:{fontSize:10,color:"#92400e",marginTop:2,fontWeight:600}},`⚠️ Possível duplicata: ${imp._duplicate.merchant} (${brl(imp._duplicate.total)})`)
-                  ),
-                  React.createElement("td",{style:{padding:"8px"}},
-                    imp.status==="lancada"?React.createElement("div",{style:{fontSize:12,color:"#6b7280"}},sugCat?`${getCat(cats,sugCat).i} ${sugCat}`:"—"):
-                    React.createElement(SelectEl,{value:sugCat,onChange:v=>setCategoryFor(imp.id,v),style:{padding:"6px 8px",fontSize:12}},
-                      React.createElement("option",{value:""},"— escolher —"),
-                      cats.map(c=>React.createElement("option",{key:c.n,value:c.n},`${c.i} ${c.n}`))
-                    )
-                  ),
-                  React.createElement("td",{style:{padding:"8px",textAlign:"right",fontWeight:700,fontSize:13}},
-                    React.createElement("div",null,brl(imp.totalAmount)),
-                    imp.installment&&imp.installment.startsWith("1/")&&React.createElement("div",{style:{fontSize:10,color:"#7c3aed",fontWeight:500}},`${imp.installment.split("/")[1]}× ${brl(imp.originalAmount)}`)
-                  ),
-                  React.createElement("td",{style:{padding:"8px",textAlign:"center"}},
-                    React.createElement("div",{style:{display:"flex",gap:4,justifyContent:"center",flexWrap:"wrap"}},
-                      imp.status==="pendente"&&React.createElement("button",{onClick:()=>launchOne(imp),disabled:busy||!sugCat,style:{padding:"5px 8px",borderRadius:8,border:"none",background:sugCat?"#16a34a":"#e5e7eb",color:sugCat?"#fff":"#9ca3af",fontSize:11,fontWeight:700,cursor:sugCat?"pointer":"not-allowed"}},"✓ Lançar"),
-                      imp.status==="pendente"&&React.createElement("button",{onClick:()=>setStatus(imp.id,"ignorada"),style:{padding:"5px 8px",borderRadius:8,border:"none",background:"#f3f4f6",color:"#6b7280",fontSize:11,fontWeight:600,cursor:"pointer"}},"🔇 Ignorar"),
-                      imp.status==="ignorada"&&React.createElement("button",{onClick:()=>setStatus(imp.id,"pendente"),style:{padding:"5px 8px",borderRadius:8,border:"none",background:"#dbeafe",color:"#1e40af",fontSize:11,fontWeight:600,cursor:"pointer"}},"↩️ Reativar"),
-                      React.createElement("button",{onClick:()=>{if(confirm("Excluir da lista? (não afeta a despesa lançada)"))onDeleteImport(imp.id);},style:{padding:"5px 8px",borderRadius:8,border:"none",background:"transparent",color:"#dc2626",fontSize:13,cursor:"pointer"}},"🗑️")
-                    )
-                  )
-                );
-              })
-            )
-          )
-        )
-      )
-    );
-  };
-
-  const renderUploadTab=()=>React.createElement(UploadCsvSection,{accounts,onUploadCsv,toast_,payers});
-  const renderAccountsTab=()=>React.createElement(AccountsManager,{accounts,payers,onAddAccount,onDeleteAccount,toast_});
-
-  const TABS=[{k:"list",l:"📋 Lista",badge:stats.pendente},{k:"upload",l:"📤 Importar"},{k:"accounts",l:"💳 Contas",badge:accounts.length}];
-
-  return React.createElement(Wrap,{wide:true,pb:30},
-    React.createElement(Header,{title:"Importação de Extratos",subtitle:`${stats.pendente} pendentes · ${stats.lancada} lançadas · ${accounts.length} conta(s)`,onBack}),
-    React.createElement("div",{style:{padding:"14px 16px 0"}},
-      React.createElement("div",{style:{display:"flex",gap:6,padding:4,background:"#fff",borderRadius:14,marginBottom:14,boxShadow:"0 1px 8px rgba(0,0,0,.05)",maxWidth:480}},
-        TABS.map(t=>React.createElement("button",{key:t.k,onClick:()=>setTab(t.k),style:{flex:1,padding:"10px 8px",borderRadius:10,border:"none",background:tab===t.k?"#1a3a2a":"transparent",color:tab===t.k?"#fff":"#6b7280",fontWeight:700,fontSize:13,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",gap:6}},
-          t.l,t.badge>0&&React.createElement("span",{style:{padding:"1px 7px",borderRadius:10,fontSize:10,background:tab===t.k?"rgba(255,255,255,.25)":"#1a3a2a",color:"#fff"}},t.badge)
-        ))
-      ),
-      tab==="list"?renderListTab():tab==="upload"?renderUploadTab():renderAccountsTab()
-    )
-  );
-}
-
-// ─── ACCOUNTS MANAGER ───────────────────────────────────────
-function AccountsManager({accounts,payers,onAddAccount,onDeleteAccount,toast_}){
-  const [adding,setAdding]=useState(false);
-  const [name,setName]=useState("");
-  const [type,setType]=useState("card");
-  const [payer,setPayer]=useState(payers[0]||"");
-  const [bank,setBank]=useState("Nubank");
-  const [color,setColor]=useState(ACCOUNT_COLORS[0]);
-
-  const handleAdd=async()=>{
-    if(!name.trim()){toast_("Digite o nome","err");return;}
-    if(!payer){toast_("Selecione a pessoa","err");return;}
-    await onAddAccount({name:name.trim(),type,payer,bank,color});
-    setName("");setAdding(false);
-  };
-
-  return React.createElement(React.Fragment,null,
-    React.createElement(Card,{title:"💳 Contas e cartões cadastrados"},
-      React.createElement("div",{style:{fontSize:12,color:"#6b7280",marginBottom:14,lineHeight:1.5}},
-        "Cada conta tem um dono — todos os gastos importados ficam vinculados a essa pessoa. Crie uma conta para cada cartão de crédito ou conta corrente que você usa."
-      ),
-      accounts.length===0?React.createElement("div",{style:{textAlign:"center",color:"#9ca3af",padding:20}},"Nenhuma conta ainda"):
-      React.createElement("div",{style:{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(280px,1fr))",gap:10,marginBottom:14}},
-        accounts.map(a=>React.createElement("div",{key:a.id,style:{padding:14,borderRadius:14,border:"2px solid #e5e7eb",background:"#fff"}},
-          React.createElement("div",{style:{display:"flex",alignItems:"center",gap:10,marginBottom:8}},
-            React.createElement("div",{style:{width:40,height:40,borderRadius:12,background:a.color+"22",display:"flex",alignItems:"center",justifyContent:"center",fontSize:20,flexShrink:0}},a.type==="card"?"💳":"🏦"),
-            React.createElement("div",{style:{flex:1,minWidth:0}},
-              React.createElement("div",{style:{fontWeight:700,fontSize:14,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}},a.name),
-              React.createElement("div",{style:{fontSize:11,color:"#6b7280"}},`${a.type==="card"?"Cartão":"Conta"} · ${a.bank} · 👤 ${a.payer}`)
-            ),
-            React.createElement("button",{onClick:()=>{if(confirm(`Excluir "${a.name}"?`))onDeleteAccount(a.id);},style:{background:"none",border:"none",fontSize:16,padding:4,color:"#dc2626"}},"🗑️")
-          )
-        ))
-      ),
-      !adding&&React.createElement("button",{onClick:()=>setAdding(true),style:{width:"100%",padding:12,borderRadius:12,background:"#fff",border:"2px dashed #2d5a3d",color:"#1a3a2a",fontWeight:700,fontSize:14,cursor:"pointer"}},"+ Nova conta ou cartão")
-    ),
-    adding&&React.createElement(Card,{title:"➕ Nova conta/cartão"},
-      React.createElement("div",{style:{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}},
-        React.createElement("div",null,
-          React.createElement(Label,null,"Nome"),
-          React.createElement(InputEl,{value:name,onChange:setName,placeholder:"Ex: Cartão Nubank Gustavo"})
-        ),
-        React.createElement("div",null,
-          React.createElement(Label,null,"Tipo"),
-          React.createElement(SelectEl,{value:type,onChange:setType},
-            React.createElement("option",{value:"card"},"💳 Cartão de crédito"),
-            React.createElement("option",{value:"checking"},"🏦 Conta corrente")
-          )
-        ),
-        React.createElement("div",null,
-          React.createElement(Label,null,"Pessoa (dono)"),
-          React.createElement(SelectEl,{value:payer,onChange:setPayer},
-            React.createElement("option",{value:""},"— escolher —"),
-            payers.map(p=>React.createElement("option",{key:p,value:p},p))
-          )
-        ),
-        React.createElement("div",null,
-          React.createElement(Label,null,"Banco"),
-          React.createElement(SelectEl,{value:bank,onChange:setBank},
-            ["Nubank","Bradesco","Itaú","Santander","Banco do Brasil","Caixa","Inter","C6","Outro"].map(b=>React.createElement("option",{key:b,value:b},b))
-          )
-        )
-      ),
-      React.createElement(Label,null,"Cor"),
-      React.createElement("div",{style:{display:"flex",gap:6,flexWrap:"wrap",marginBottom:14}},
-        ACCOUNT_COLORS.map(col=>React.createElement("button",{key:col,onClick:()=>setColor(col),style:{width:36,height:36,borderRadius:"50%",background:col,border:color===col?"3px solid #1a1a1a":"3px solid transparent",cursor:"pointer"}}))
-      ),
-      React.createElement("div",{style:{display:"flex",gap:8}},
-        React.createElement("button",{onClick:()=>{setAdding(false);setName("");},style:{flex:1,padding:12,borderRadius:12,background:"#f3f4f6",color:"#374151",border:"none",fontWeight:700,fontSize:14}},"Cancelar"),
-        React.createElement("button",{onClick:handleAdd,style:{flex:2,padding:12,borderRadius:12,background:"linear-gradient(135deg,#1a3a2a,#2d5a3d)",color:"#fff",border:"none",fontWeight:700,fontSize:14}},"✓ Adicionar conta")
-      )
-    )
-  );
-}
-
-// ─── UPLOAD CSV SECTION ─────────────────────────────────────
-function UploadCsvSection({accounts,onUploadCsv,toast_,payers}){
-  const [accountId,setAccountId]=useState(accounts[0]?.id||"");
-  const [busy,setBusy]=useState(false);
-  const [preview,setPreview]=useState(null);
-  const fileRef=useRef();
-
-  useEffect(()=>{if(!accountId&&accounts.length>0)setAccountId(accounts[0].id);},[accounts]);
-
-  const handleFile=async(file)=>{
-    if(!file)return;
-    if(!accountId){toast_("Selecione uma conta","err");return;}
-    setBusy(true);
-    setPreview(null);
-    try{
-      // Tenta UTF-8 primeiro; se falhar, usa ISO-8859-1 (Bradesco)
-      const buffer=await file.arrayBuffer();
-      let text;
-      try{text=new TextDecoder("utf-8",{fatal:true}).decode(buffer);}
-      catch{text=new TextDecoder("iso-8859-1").decode(buffer);}
-      
-      const format=detectCSVFormat(text);
-      if(!format){toast_("Formato não reconhecido. Use CSV do Nubank ou Bradesco.","err");setBusy(false);return;}
-      
-      let items;
-      if(format==="nubank_card")items=parseNubankCard(text,accountId);
-      else if(format==="nubank_cc")items=parseNubankCC(text,accountId,payers);
-      else if(format==="bradesco_card")items=parseBradescoCard(text,accountId);
-      else if(format==="bradesco_cc")items=parseBradescoCC(text,accountId,payers);
-      else {toast_("Formato detectado mas parser não implementado","err");setBusy(false);return;}
-      
-      if(items.length===0){toast_("Nenhuma transação válida encontrada","err");setBusy(false);return;}
-      setPreview({format,items,filename:file.name});
-    }catch(err){toast_("⚠️ "+err.message,"err");}
-    setBusy(false);
-  };
-
-  const confirmImport=async()=>{
-    if(!preview)return;
-    setBusy(true);
-    const r=await onUploadCsv(preview.items);
-    setBusy(false);
-    if(r&&r.ok){
-      toast_(`✅ ${r.added||0} importadas (${preview.items.length-(r.added||0)} duplicadas ignoradas)`);
-      setPreview(null);
-      if(fileRef.current)fileRef.current.value="";
-    }
-  };
-
-  if(accounts.length===0)return React.createElement(Card,null,
-    React.createElement("div",{style:{textAlign:"center",padding:30,color:"#6b7280"}},
-      React.createElement("div",{style:{fontSize:48,marginBottom:8}},"💳"),
-      React.createElement("div",{style:{fontWeight:600,marginBottom:4}},"Cadastre uma conta primeiro"),
-      React.createElement("div",{style:{fontSize:13}},"Vá na aba 'Contas' e adicione pelo menos um cartão ou conta")
-    )
-  );
-
-  return React.createElement(React.Fragment,null,
-    React.createElement(Card,{title:"📤 Importar arquivo CSV"},
-      React.createElement("div",{style:{fontSize:12,color:"#6b7280",marginBottom:14,lineHeight:1.5}},
-        "Formatos suportados: ",React.createElement("b",null,"Nubank")," (CSV cartão e conta) e ",React.createElement("b",null,"Bradesco")," (CSV fatura e extrato). ",React.createElement("br"),
-        "O sistema detecta automaticamente o formato, identifica parcelas e marca duplicatas."
-      ),
-      React.createElement(Label,null,"1. Escolha a conta"),
-      React.createElement(SelectEl,{value:accountId,onChange:setAccountId},
-        accounts.map(a=>React.createElement("option",{key:a.id,value:a.id},`${a.type==="card"?"💳":"🏦"} ${a.name}`))
-      ),
-      React.createElement(Label,null,"2. Selecione o arquivo CSV"),
-      React.createElement("input",{ref:fileRef,type:"file",accept:".csv",onChange:e=>handleFile(e.target.files[0]),disabled:busy,style:{padding:10,borderRadius:12,border:"1.5px dashed #2d5a3d",background:"#f9fafb",width:"100%",fontSize:14,cursor:"pointer"}})
-    ),
-
-    busy&&React.createElement(Card,null,
-      React.createElement("div",{style:{display:"flex",alignItems:"center",gap:12,padding:14}},
-        React.createElement(Spinner,{size:24,color:"#2d5a3d"}),
-        React.createElement("div",{style:{fontWeight:600}},"Processando CSV...")
-      )
-    ),
-
-    preview&&React.createElement(Card,{title:`✅ Pré-visualização: ${preview.filename}`},
-      React.createElement("div",{style:{padding:14,background:"#f0fdf4",border:"1.5px solid #16a34a40",borderRadius:12,marginBottom:14}},
-        React.createElement("div",{style:{fontWeight:700,fontSize:15,color:"#166534",marginBottom:4}},`${preview.items.length} transações encontradas`),
-        React.createElement("div",{style:{fontSize:12,color:"#166534"}},
-          `Formato: ${preview.format==="nubank_card"?"💳 Cartão Nubank":preview.format==="nubank_cc"?"🏦 Conta corrente Nubank":preview.format==="bradesco_card"?"💳 Cartão Bradesco":preview.format==="bradesco_cc"?"🏦 Conta corrente Bradesco":preview.format}`,
-          React.createElement("br"),
-          `Pendentes: ${preview.items.filter(i=>i.status==="pendente").length} · Já filtradas: ${preview.items.filter(i=>i.status==="ignorada").length}`
-        )
-      ),
-      React.createElement("div",{style:{maxHeight:300,overflow:"auto",border:"1px solid #e5e7eb",borderRadius:10,marginBottom:14}},
-        React.createElement("table",{style:{width:"100%",fontSize:11,borderCollapse:"collapse"}},
-          React.createElement("thead",{style:{background:"#f9fafb",position:"sticky",top:0}},
-            React.createElement("tr",null,
-              React.createElement("th",{style:{padding:6,textAlign:"left"}},"Status"),
-              React.createElement("th",{style:{padding:6,textAlign:"left"}},"Data"),
-              React.createElement("th",{style:{padding:6,textAlign:"left"}},"Título"),
-              React.createElement("th",{style:{padding:6,textAlign:"right"}},"Valor")
-            )
-          ),
-          React.createElement("tbody",null,
-            preview.items.slice(0,50).map((it,i)=>React.createElement("tr",{key:i,style:{borderBottom:"1px solid #f0ede6"}},
-              React.createElement("td",{style:{padding:6}},it.status==="ignorada"?"🔇":"⏳"),
-              React.createElement("td",{style:{padding:6}},dtBR(it.date)),
-              React.createElement("td",{style:{padding:6,maxWidth:300,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}},it.title,it.installment?` (${it.installment})`:""),
-              React.createElement("td",{style:{padding:6,textAlign:"right",fontWeight:600}},brl(it.totalAmount))
-            ))
-          )
-        )
-      ),
-      preview.items.length>50&&React.createElement("div",{style:{fontSize:11,color:"#9ca3af",marginBottom:14,textAlign:"center"}},`(mostrando primeiras 50 de ${preview.items.length})`),
-      React.createElement("div",{style:{display:"flex",gap:8}},
-        React.createElement("button",{onClick:()=>setPreview(null),style:{flex:1,padding:12,borderRadius:12,background:"#f3f4f6",color:"#374151",border:"none",fontWeight:700,fontSize:14}},"Cancelar"),
-        React.createElement("button",{onClick:confirmImport,style:{flex:2,padding:12,borderRadius:12,background:"linear-gradient(135deg,#16a34a,#15803d)",color:"#fff",border:"none",fontWeight:700,fontSize:14}},`✓ Importar ${preview.items.length} transações`)
-      )
-    )
-  );
-}
-
-function DashboardView({expenses,cats,payers,accounts,onBack}){
-  const [period,setPeriod]=useState("thisMonth");
-  const [tab,setTab]=useState("resumo");
-  const [filterPerson,setFilterPerson]=useState("todos");
-  const [filterCat,setFilterCat]=useState("Todas");
-  const [expandedCat,setExpandedCat]=useState(null);
-  const now=new Date();
-  const range=periodRange(period,now);
-  const prevRange=shiftPeriodPrev(period,now);
-  const inPeriod=expenses.filter(e=>inRange(e.date,range.from,range.to));
-  const filtered=inPeriod.filter(e=>{
-    if(filterPerson!=="todos"){const split=effectiveSplit(e);if(!split.includes(filterPerson)&&e.payer!==filterPerson)return false;}
-    if(filterCat!=="Todas"&&e.category!==filterCat)return false;
-    return true;
-  });
-  const total=filtered.reduce((s,e)=>s+(+e.total||0),0);
-  const txCount=filtered.length;
-  const avgPerDay=total/daysBetween(new Date(range.from+"T12:00"),new Date(range.to+"T12:00"));
-  let projection=null;
-  if(period==="thisMonth"){
-    const daysPassed=Math.max(1,now.getDate());
-    const daysInMonth=new Date(now.getFullYear(),now.getMonth()+1,0).getDate();
-    projection=(total/daysPassed)*daysInMonth;
   }
-  const biggest=filtered.reduce((m,e)=>(+e.total>(+m?.total||0))?e:m,null);
-  let prevTotal=0,diffPct=null;
-  if(prevRange){
-    const prev=expenses.filter(e=>inRange(e.date,prevRange.from,prevRange.to));
-    const prevFilt=prev.filter(e=>{
-      if(filterPerson!=="todos"){const split=effectiveSplit(e);if(!split.includes(filterPerson)&&e.payer!==filterPerson)return false;}
-      if(filterCat!=="Todas"&&e.category!==filterCat)return false;
-      return true;
+
+  const impSheet = getImportsSheet(ss);
+  const impData = impSheet.getDataRange().getValues();
+  const imports = [];
+  for (let i = 1; i < impData.length; i++) {
+    if (!impData[i][0]) continue;
+    const r = impData[i];
+    imports.push({
+      id: String(r[0]),
+      accountId: String(r[1] || ""),
+      date: r[2] instanceof Date ? Utilities.formatDate(r[2], TZ, "yyyy-MM-dd") : String(r[2] || ""),
+      title: String(r[3] || ""),
+      originalAmount: Number(r[4]) || 0,
+      totalAmount: Number(r[5]) || 0,
+      status: String(r[6] || "pendente"),
+      category: String(r[7] || ""),
+      reason: String(r[8] || ""),
+      installment: String(r[9] || ""),
+      expenseId: String(r[10] || ""),
+      hash: String(r[11] || ""),
+      createdAt: r[12] instanceof Date ? r[12].toISOString() : String(r[12] || "")
     });
-    prevTotal=prevFilt.reduce((s,e)=>s+(+e.total||0),0);
-    if(prevTotal>0)diffPct=((total-prevTotal)/prevTotal)*100;
   }
-  const catSum={};
-  filtered.forEach(e=>{catSum[e.category]=(catSum[e.category]||0)+(+e.total||0);});
-  const catList=Object.entries(catSum).map(([n,v])=>({n,v:+v.toFixed(2)})).sort((a,b)=>b.v-a.v);
-  const catCompare={};
-  if(prevRange){
-    const prev=expenses.filter(e=>inRange(e.date,prevRange.from,prevRange.to));
-    prev.forEach(e=>{catCompare[e.category]=(catCompare[e.category]||0)+(+e.total||0);});
-  }
-  const perPerson={};
-  filtered.forEach(e=>{
-    const t=+e.total||0;
-    if(e.payer){perPerson[e.payer]=perPerson[e.payer]||{paid:0,consumed:0};perPerson[e.payer].paid+=t;}
-    const split=effectiveSplit(e);
-    if(split.length>0){const share=t/split.length;split.forEach(p=>{perPerson[p]=perPerson[p]||{paid:0,consumed:0};perPerson[p].consumed+=share;});}
-  });
-  const perPersonArr=Object.entries(perPerson).map(([name,d])=>({name,paid:d.paid,consumed:d.consumed,balance:d.paid-d.consumed})).sort((a,b)=>b.balance-a.balance);
-  const debts=[];
-  if(perPersonArr.length>1){
-    const creds=perPersonArr.filter(p=>p.balance>0.01).map(p=>({...p,bal:p.balance}));
-    const dbts=perPersonArr.filter(p=>p.balance<-0.01).map(p=>({...p,bal:-p.balance}));
-    creds.sort((a,b)=>b.bal-a.bal);dbts.sort((a,b)=>b.bal-a.bal);
-    let i=0,j=0;
-    while(i<dbts.length&&j<creds.length){
-      const amt=Math.min(dbts[i].bal,creds[j].bal);
-      if(amt>0.01)debts.push({from:dbts[i].name,to:creds[j].name,amount:amt});
-      dbts[i].bal-=amt;creds[j].bal-=amt;
-      if(dbts[i].bal<0.01)i++;
-      if(creds[j].bal<0.01)j++;
+
+  return {
+    ok: true,
+    expenses: expenses.sort((a, b) => (b.date + b.at).localeCompare(a.date + a.at)),
+    learning, payers, categories, accounts, imports
+  };
+}
+
+// ─── EXPENSES (mantém) ─────────────────────────────────────
+function saveExpense(exp) {
+  if (!exp || !exp.id) return { ok: false, error: "Dados inválidos" };
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = getGastosSheet(ss);
+  let driveUrl = exp.driveUrl || "";
+  if (exp.imageBase64) driveUrl = saveReceiptFile(exp.imageBase64, exp);
+  sheet.appendRow([
+    exp.id, exp.date, exp.merchant || "", exp.category || "",
+    Number(exp.total) || 0, exp.payer || "", (exp.items || []).join(", "),
+    driveUrl, exp.at || new Date().toISOString(), (exp.splitWith || []).join(", "),
+    exp.account || "", exp.importId || ""
+  ]);
+  if (exp.merchant && exp.category) updateLearning(exp.merchant, exp.category);
+  return { ok: true, id: exp.id, driveUrl };
+}
+
+function deleteExpense(id) {
+  const sheet = getGastosSheet(SpreadsheetApp.getActiveSpreadsheet());
+  const data = sheet.getDataRange().getValues();
+  for (let i = data.length - 1; i >= 1; i--) if (String(data[i][0]) === String(id)) { sheet.deleteRow(i + 1); return { ok: true }; }
+  return { ok: false, error: "Não encontrado" };
+}
+
+function updateLearning(merchant, category) {
+  if (!merchant || !category) return { ok: false };
+  const sheet = getAprendizadoSheet(SpreadsheetApp.getActiveSpreadsheet());
+  const data = sheet.getDataRange().getValues();
+  for (let i = 1; i < data.length; i++) {
+    if (String(data[i][0]) === merchant) {
+      sheet.getRange(i + 1, 2).setValue(category);
+      sheet.getRange(i + 1, 3).setValue(new Date().toISOString());
+      return { ok: true };
     }
   }
-  const dayMap={};
-  filtered.forEach(e=>{if(e.date)dayMap[e.date]=(dayMap[e.date]||0)+(+e.total||0);});
-  const fromD=new Date(range.from+"T12:00");const toD=new Date(range.to+"T12:00");
-  const daysArr=[];
-  for(let d=new Date(fromD);d<=toD;d.setDate(d.getDate()+1)){const k=ymd(d);daysArr.push({date:k,v:dayMap[k]||0,day:d.getDate()});}
-  let timelineData=daysArr;let groupBy="day";
-  if(daysArr.length>62){
-    groupBy="month";
-    const monthMap={};daysArr.forEach(d=>{const mk=d.date.slice(0,7);monthMap[mk]=(monthMap[mk]||0)+d.v;});
-    timelineData=Object.entries(monthMap).map(([k,v])=>({date:k,v,label:new Date(k+"-15").toLocaleDateString("pt-BR",{month:"short"})}));
-  }
-  const weekMap={};
-  filtered.forEach(e=>{if(!e.date)return;const d=new Date(e.date+"T12:00");const monday=new Date(d);monday.setDate(d.getDate()-((d.getDay()+6)%7));const k=ymd(monday);weekMap[k]=(weekMap[k]||0)+(+e.total||0);});
-  const weekArr=Object.entries(weekMap).map(([k,v])=>({k,v,label:`${new Date(k+"T12:00").getDate()}/${new Date(k+"T12:00").getMonth()+1}`})).sort((a,b)=>a.k.localeCompare(b.k));
-  const dowMap=[0,0,0,0,0,0,0];
-  filtered.forEach(e=>{if(!e.date)return;dowMap[new Date(e.date+"T12:00").getDay()]+=(+e.total||0);});
-  const dowArr=DOW_LABELS.map((l,i)=>({label:l,v:dowMap[i]}));
-  const maxDow=Math.max(...dowMap,1);
-  const merchMap={};
-  filtered.forEach(e=>{const m=e.merchant||"Sem nome";merchMap[m]=merchMap[m]||{total:0,count:0};merchMap[m].total+=(+e.total||0);merchMap[m].count++;});
-  const topByValue=Object.entries(merchMap).map(([n,d])=>({n,...d})).sort((a,b)=>b.total-a.total).slice(0,10);
-  const topByFreq=Object.entries(merchMap).map(([n,d])=>({n,...d})).sort((a,b)=>b.count-a.count).slice(0,10);
-
-  const PieChartSvg=()=>{
-    let offset=0;const tot=catList.reduce((s,e)=>s+e.v,0)||1;const cx=80,cy=80,r=72,ri=40;const rad=a=>a*Math.PI/180;
-    return React.createElement("svg",{viewBox:"0 0 160 160",width:160,height:160},
-      catList.map((e,i)=>{
-        const pct=e.v/tot,angle=pct*360;const s=rad(offset-90),en=rad(offset+angle-90);
-        const x1=cx+r*Math.cos(s),y1=cy+r*Math.sin(s),x2=cx+r*Math.cos(en),y2=cy+r*Math.sin(en);
-        const ix1=cx+ri*Math.cos(s),iy1=cy+ri*Math.sin(s),ix2=cx+ri*Math.cos(en),iy2=cy+ri*Math.sin(en);
-        const la=angle>180?1:0;
-        const d=`M${x1},${y1} A${r},${r},0,${la},1,${x2},${y2} L${ix2},${iy2} A${ri},${ri},0,${la},0,${ix1},${iy1} Z`;
-        offset+=angle;
-        return React.createElement("path",{key:i,d,fill:getCat(cats,e.n).c});
-      }),
-      React.createElement("text",{x:80,y:78,textAnchor:"middle",fontSize:13,fontWeight:700,fill:"#1a1a1a"},brlShort(tot)),
-      React.createElement("text",{x:80,y:92,textAnchor:"middle",fontSize:9,fill:"#9ca3af"},catList.length+" cat.")
-    );
-  };
-  const LineChartSvg=()=>{
-    const W=400,H=120,P=20;
-    const max=Math.max(...timelineData.map(d=>d.v),1);
-    const stepX=(W-2*P)/Math.max(1,timelineData.length-1);
-    const points=timelineData.map((d,i)=>{const x=P+i*stepX;const y=H-P-(d.v/max)*(H-2*P);return [x,y];});
-    const pathD=points.map((p,i)=>(i===0?"M":"L")+p[0].toFixed(1)+","+p[1].toFixed(1)).join(" ");
-    const areaD=pathD+` L${points[points.length-1]?.[0]||P},${H-P} L${P},${H-P} Z`;
-    return React.createElement("svg",{viewBox:`0 0 ${W} ${H}`,width:"100%",height:H,preserveAspectRatio:"none"},
-      React.createElement("defs",null,React.createElement("linearGradient",{id:"glin",x1:"0",y1:"0",x2:"0",y2:"1"},
-        React.createElement("stop",{offset:"0%","stopColor":"#2d5a3d","stopOpacity":"0.3"}),
-        React.createElement("stop",{offset:"100%","stopColor":"#2d5a3d","stopOpacity":"0"})
-      )),
-      React.createElement("path",{d:areaD,fill:"url(#glin)"}),
-      React.createElement("path",{d:pathD,fill:"none",stroke:"#2d5a3d",strokeWidth:"2.5",strokeLinejoin:"round",strokeLinecap:"round"}),
-      points.map(([x,y],i)=>timelineData[i].v>0&&React.createElement("circle",{key:i,cx:x,cy:y,r:2.5,fill:"#2d5a3d"}))
-    );
-  };
-
-  const renderResumo=()=>React.createElement(React.Fragment,null,
-    React.createElement("div",{style:{display:"flex",gap:8,marginBottom:14}},
-      React.createElement(KPI,{label:"Total",value:brlShort(total),sub:txCount+" transações"}),
-      React.createElement(KPI,{label:"Média/dia",value:brlShort(avgPerDay)}),
-      projection!=null?React.createElement(KPI,{label:"Projeção mês",value:brlShort(projection),color:projection>total*1.5?"#dc2626":"#1a3a2a"}):null
-    ),
-    React.createElement("div",{style:{display:"flex",gap:8,marginBottom:14}},
-      biggest&&React.createElement(KPI,{label:"Maior gasto",value:brlShort(biggest.total),sub:(biggest.merchant||"-").slice(0,18)}),
-      diffPct!=null&&React.createElement(KPI,{label:"vs anterior",value:(diffPct>0?"+":"")+diffPct.toFixed(0)+"%",sub:brlShort(prevTotal),color:diffPct>0?"#dc2626":"#16a34a"})
-    ),
-    catList.length>0&&React.createElement(Card,{title:"Por categoria"},
-      React.createElement("div",{style:{display:"flex",alignItems:"center",gap:14}},
-        React.createElement(PieChartSvg),
-        React.createElement("div",{style:{flex:1,minWidth:0}},
-          catList.slice(0,6).map((e,i)=>{const cat=getCat(cats,e.n);const pct=(e.v/total*100).toFixed(0);return React.createElement("div",{key:i,style:{display:"flex",alignItems:"center",gap:6,fontSize:12,marginBottom:5}},
-            React.createElement("div",{style:{width:8,height:8,borderRadius:"50%",background:cat.c,flexShrink:0}}),
-            React.createElement("span",{style:{flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}},cat.i+" "+e.n),
-            React.createElement("span",{style:{fontWeight:700,fontSize:11}},pct+"%")
-          );})
-        )
-      )
-    ),
-    timelineData.length>1&&React.createElement(Card,{title:groupBy==="month"?"Por mês":"Evolução diária"},React.createElement(LineChartSvg))
-  );
-
-  const renderPessoas=()=>React.createElement(React.Fragment,null,
-    perPersonArr.length===0?React.createElement(Card,null,React.createElement("div",{style:{textAlign:"center",color:"#9ca3af",padding:20}},"Sem dados")):
-    React.createElement(Card,{title:"Pagou × Consumiu"},
-      perPersonArr.map(p=>{
-        const balanceColor=p.balance>0.01?"#16a34a":p.balance<-0.01?"#dc2626":"#6b7280";
-        const balanceText=p.balance>0.01?`+${brl(p.balance)}`:p.balance<-0.01?`-${brl(Math.abs(p.balance))}`:brl(0);
-        return React.createElement("div",{key:p.name,style:{padding:"12px 0",borderBottom:"1px solid #f0ede6"}},
-          React.createElement("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}},
-            React.createElement("div",{style:{fontWeight:700,fontSize:14}},p.name),
-            React.createElement("div",{style:{fontWeight:700,fontSize:15,color:balanceColor}},balanceText)
-          ),
-          React.createElement("div",{style:{display:"flex",justifyContent:"space-between",fontSize:11,color:"#6b7280"}},
-            React.createElement("span",null,"💳 Pagou ",React.createElement("b",{style:{color:"#374151"}},brl(p.paid))),
-            React.createElement("span",null,"🛒 Consumiu ",React.createElement("b",{style:{color:"#374151"}},brl(p.consumed)))
-          )
-        );
-      })
-    ),
-    debts.length>0&&React.createElement(Card,{title:"💸 Quem deve a quem"},
-      debts.map((d,i)=>React.createElement("div",{key:i,style:{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"10px 0",borderBottom:i<debts.length-1?"1px solid #f0ede6":"none"}},
-        React.createElement("div",{style:{display:"flex",alignItems:"center",gap:8,fontSize:13}},
-          React.createElement("span",{style:{fontWeight:700,color:"#dc2626"}},d.from),
-          React.createElement("span",{style:{color:"#9ca3af"}},"→"),
-          React.createElement("span",{style:{fontWeight:700,color:"#16a34a"}},d.to)
-        ),
-        React.createElement("div",{style:{fontWeight:700,fontSize:14}},brl(d.amount))
-      ))
-    )
-  );
-
-  const renderCategorias=()=>React.createElement(React.Fragment,null,
-    catList.length===0?React.createElement(Card,null,React.createElement("div",{style:{textAlign:"center",color:"#9ca3af",padding:20}},"Sem dados")):
-    catList.map(c=>{
-      const cat=getCat(cats,c.n);const prevV=catCompare[c.n]||0;const dPct=prevV>0?((c.v-prevV)/prevV)*100:null;
-      const expanded=expandedCat===c.n;
-      const catExpenses=filtered.filter(e=>e.category===c.n).sort((a,b)=>(b.date||"").localeCompare(a.date||""));
-      return React.createElement(Card,{key:c.n,style:{padding:0,overflow:"hidden"}},
-        React.createElement("div",{onClick:()=>setExpandedCat(expanded?null:c.n),style:{padding:14,cursor:"pointer",display:"flex",alignItems:"center",gap:12}},
-          React.createElement("div",{style:{width:40,height:40,borderRadius:12,background:cat.c+"20",display:"flex",alignItems:"center",justifyContent:"center",fontSize:18}},cat.i),
-          React.createElement("div",{style:{flex:1,minWidth:0}},
-            React.createElement("div",{style:{fontWeight:700,fontSize:14}},c.n),
-            React.createElement("div",{style:{fontSize:11,color:"#6b7280",marginTop:2,display:"flex",gap:8,alignItems:"center"}},
-              React.createElement("span",null,(c.v/total*100).toFixed(0)+"% do total"),
-              dPct!=null&&React.createElement("span",{style:{color:dPct>0?"#dc2626":"#16a34a"}},(dPct>0?"▲":"▼")+" "+Math.abs(dPct).toFixed(0)+"%")
-            )
-          ),
-          React.createElement("div",{style:{textAlign:"right"}},
-            React.createElement("div",{style:{fontWeight:700,fontSize:15}},brl(c.v)),
-            React.createElement("div",{style:{fontSize:11,color:"#9ca3af"}},catExpenses.length+" tx")
-          ),
-          React.createElement("span",{style:{fontSize:14,color:"#9ca3af",marginLeft:4}},expanded?"▲":"▼")
-        ),
-        expanded&&React.createElement("div",{style:{padding:"0 14px 14px",borderTop:"1px solid #f0ede6"}},
-          catExpenses.map(e=>React.createElement(ExpRow,{key:e.id,e,cats,accounts}))
-        )
-      );
-    })
-  );
-
-  const renderTendencias=()=>React.createElement(React.Fragment,null,
-    weekArr.length>0&&React.createElement(Card,{title:"Por semana"},
-      React.createElement("div",{style:{display:"flex",alignItems:"flex-end",gap:6,height:130,paddingTop:10}},
-        weekArr.map((w,i)=>{const max=Math.max(...weekArr.map(x=>x.v),1);const h=Math.max(4,(w.v/max)*100);return React.createElement("div",{key:i,style:{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:4,minWidth:0}},
-          React.createElement("div",{style:{fontSize:9,color:"#6b7280",fontWeight:600}},w.v>0?brlShort(w.v).replace("R$ ",""):""),
-          React.createElement("div",{style:{height:h,width:"100%",background:i===weekArr.length-1?"#1a3a2a":"#c6dece",borderRadius:"4px 4px 0 0"}}),
-          React.createElement("div",{style:{fontSize:9,color:"#6b7280"}},w.label)
-        );})
-      )
-    ),
-    React.createElement(Card,{title:"📅 Por dia da semana"},
-      React.createElement("div",{style:{display:"flex",alignItems:"flex-end",gap:8,height:120,paddingTop:8}},
-        dowArr.map((d,i)=>{const h=Math.max(4,(d.v/maxDow)*95);const isMax=d.v===maxDow&&d.v>0;return React.createElement("div",{key:i,style:{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:4}},
-          React.createElement("div",{style:{fontSize:9,color:"#6b7280",fontWeight:600}},d.v>0?brlShort(d.v).replace("R$ ",""):""),
-          React.createElement("div",{style:{height:h,width:"100%",background:isMax?"#dc2626":"#7c3aed",borderRadius:"4px 4px 0 0",opacity:d.v>0?1:0.3}}),
-          React.createElement("div",{style:{fontSize:11,color:isMax?"#dc2626":"#6b7280",fontWeight:isMax?700:500}},d.label)
-        );})
-      )
-    ),
-    topByValue.length>0&&React.createElement(Card,{title:"🏆 Top 10 por valor"},
-      topByValue.map((m,i)=>React.createElement("div",{key:i,style:{display:"flex",alignItems:"center",gap:10,padding:"10px 0",borderBottom:i<topByValue.length-1?"1px solid #f0ede6":"none"}},
-        React.createElement("div",{style:{width:24,height:24,borderRadius:"50%",background:i<3?"#1a3a2a":"#f3f4f6",color:i<3?"#fff":"#374151",display:"flex",alignItems:"center",justifyContent:"center",fontSize:11,fontWeight:700,flexShrink:0}},i+1),
-        React.createElement("div",{style:{flex:1,minWidth:0}},React.createElement("div",{style:{fontWeight:600,fontSize:13,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}},m.n),React.createElement("div",{style:{fontSize:11,color:"#9ca3af"}},m.count+" visita"+(m.count>1?"s":""))),
-        React.createElement("div",{style:{fontWeight:700,fontSize:13}},brl(m.total))
-      ))
-    ),
-    topByFreq.length>0&&React.createElement(Card,{title:"🔁 Top 10 por frequência"},
-      topByFreq.map((m,i)=>React.createElement("div",{key:i,style:{display:"flex",alignItems:"center",gap:10,padding:"10px 0",borderBottom:i<topByFreq.length-1?"1px solid #f0ede6":"none"}},
-        React.createElement("div",{style:{width:24,height:24,borderRadius:"50%",background:i<3?"#7c3aed":"#f3f4f6",color:i<3?"#fff":"#374151",display:"flex",alignItems:"center",justifyContent:"center",fontSize:11,fontWeight:700,flexShrink:0}},i+1),
-        React.createElement("div",{style:{flex:1,minWidth:0}},React.createElement("div",{style:{fontWeight:600,fontSize:13,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}},m.n),React.createElement("div",{style:{fontSize:11,color:"#9ca3af"}},brl(m.total)+" total")),
-        React.createElement("div",{style:{fontWeight:700,fontSize:14,color:"#7c3aed"}},m.count+"×")
-      ))
-    )
-  );
-
-  const TABS=[{k:"resumo",l:"Resumo"},{k:"pessoas",l:"Pessoas"},{k:"categorias",l:"Categorias"},{k:"tendencias",l:"Tendências"}];
-
-  return React.createElement(Wrap,{pb:80},
-    React.createElement(Header,{title:"Dashboard",subtitle:range.label,onBack}),
-    React.createElement("div",{style:{padding:"14px 16px 0"}},
-      React.createElement("div",{style:{overflowX:"auto",display:"flex",gap:8,paddingBottom:10,marginBottom:6}},
-        [{k:"thisMonth",l:"Este mês"},{k:"lastMonth",l:"Mês passado"},{k:"last3",l:"3 meses"},{k:"thisYear",l:"Este ano"},{k:"all",l:"Tudo"}].map(p=>React.createElement(Pill,{key:p.k,active:period===p.k,onClick:()=>setPeriod(p.k)},p.l))
-      ),
-      payers.length>1&&React.createElement("div",{style:{overflowX:"auto",display:"flex",gap:8,paddingBottom:10}},
-        [{k:"todos",l:"👥 Todos"},...payers.map(p=>({k:p,l:p}))].map(p=>React.createElement(Pill,{key:p.k,active:filterPerson===p.k,onClick:()=>setFilterPerson(p.k),color:"#7c3aed"},p.l))
-      ),
-      React.createElement("div",{style:{overflowX:"auto",display:"flex",gap:8,paddingBottom:14}},
-        [{n:"Todas",i:"📊"},...cats].map(c=>React.createElement("button",{key:c.n,onClick:()=>setFilterCat(c.n),style:{padding:"6px 12px",borderRadius:20,border:"none",whiteSpace:"nowrap",background:filterCat===c.n?(c.c||"#1a3a2a"):"#f3f4f6",color:filterCat===c.n?"#fff":"#374151",fontWeight:600,fontSize:12,cursor:"pointer"}},c.i+" "+c.n))
-      ),
-      React.createElement("div",{style:{display:"flex",gap:6,padding:4,background:"#fff",borderRadius:14,marginBottom:14,boxShadow:"0 1px 8px rgba(0,0,0,.05)"}},
-        TABS.map(t=>React.createElement("button",{key:t.k,onClick:()=>setTab(t.k),style:{flex:1,padding:"8px 4px",borderRadius:10,border:"none",background:tab===t.k?"#1a3a2a":"transparent",color:tab===t.k?"#fff":"#6b7280",fontWeight:700,fontSize:12,cursor:"pointer"}},t.l))
-      ),
-      filtered.length===0?React.createElement("div",{style:{textAlign:"center",padding:"40px 20px",color:"#9ca3af",background:"#fff",borderRadius:20}},
-        React.createElement("div",{style:{fontSize:48,marginBottom:8}},"📊"),
-        React.createElement("div",{style:{fontWeight:600,marginBottom:4}},"Sem dados")
-      ):tab==="resumo"?renderResumo():tab==="pessoas"?renderPessoas():tab==="categorias"?renderCategorias():renderTendencias()
-    )
-  );
+  sheet.appendRow([merchant, category, new Date().toISOString()]);
+  return { ok: true };
 }
 
-function ReviewForm({imageUrl,pdfFilename,result,setResult,payer,setPayer,splitWith,setSplitWith,payers,cats,onSave,saveLabel="💾 Salvar gasto",extraButton}){
-  const set=(k,v)=>setResult(p=>({...p,[k]:v}));
-  useEffect(()=>{if(payer&&!splitWith.includes(payer))setSplitWith(p=>[...p,payer]);},[payer]);
-  const toggleAll=()=>{if(splitWith.length===payers.length)setSplitWith([payer]);else setSplitWith([...payers]);};
-  const togglePerson=(p)=>{if(p===payer)return;if(splitWith.includes(p))setSplitWith(splitWith.filter(x=>x!==p));else setSplitWith([...splitWith,p]);};
-  const valorPorPessoa=parseFloat((result.total||"0").replace(",","."))/Math.max(1,splitWith.length);
-  return React.createElement("div",{style:{padding:16}},
-    React.createElement(PreviewBox,{imageUrl,pdfFilename}),
-    React.createElement(Card,{title:"Dados do comprovante"},
-      React.createElement(Label,null,"Estabelecimento"),React.createElement(InputEl,{value:result.merchant,onChange:v=>set("merchant",v),placeholder:"Ex: Pão de Açúcar"}),
-      React.createElement(Label,null,"Valor total"),React.createElement(InputEl,{value:result.total,onChange:v=>set("total",v),placeholder:"89,90",inputMode:"decimal"}),
-      React.createElement(Label,null,"Data"),React.createElement(InputEl,{value:result.date,onChange:v=>set("date",v),type:"date"}),
-      result.items?.length>0&&React.createElement("div",{style:{marginTop:8,fontSize:12,color:"#6b7280"}},"📦 "+result.items.slice(0,4).join(", "))
-    ),
-    React.createElement(Card,{title:"Categoria"},
-      React.createElement("div",{style:{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8}},
-        cats.map(cat=>React.createElement("button",{key:cat.n,onClick:()=>set("category",cat.n),style:{border:"2px solid",borderColor:result.category===cat.n?cat.c:"transparent",borderRadius:14,padding:"8px 4px",background:result.category===cat.n?cat.c+"18":"#f9f9f9",display:"flex",flexDirection:"column",alignItems:"center",gap:2}},
-          React.createElement("span",{style:{fontSize:20}},cat.i),React.createElement("span",{style:{fontSize:10,fontWeight:600,color:result.category===cat.n?cat.c:"#374151"}},cat.n)
-        ))
-      )
-    ),
-    React.createElement(Card,{title:"💳 Quem pagou?"},
-      React.createElement("div",{style:{display:"flex",gap:8,flexWrap:"wrap"}},
-        payers.map(p=>React.createElement("button",{key:p,onClick:()=>setPayer(p),style:{padding:"8px 18px",borderRadius:24,border:"2px solid",borderColor:payer===p?"#1a3a2a":"#e5e7eb",background:payer===p?"#1a3a2a":"#fff",color:payer===p?"#fff":"#374151",fontWeight:600,fontSize:14}},p))
-      )
-    ),
-    React.createElement(Card,{title:"🤝 Dividir entre quem?"},
-      React.createElement("button",{onClick:toggleAll,style:{width:"100%",padding:10,borderRadius:12,border:"none",background:splitWith.length===payers.length?"#1a3a2a":"#f3f4f6",color:splitWith.length===payers.length?"#fff":"#374151",fontWeight:700,fontSize:13,marginBottom:10}},splitWith.length===payers.length?"✓ Todos":"+ Marcar todos"),
-      React.createElement("div",{style:{display:"flex",gap:8,flexWrap:"wrap"}},
-        payers.map(p=>{const sel=splitWith.includes(p);const isPayer=p===payer;return React.createElement("button",{key:p,onClick:()=>togglePerson(p),style:{padding:"8px 14px",borderRadius:24,border:"2px solid",borderColor:sel?"#2d5a3d":"#e5e7eb",background:sel?"#2d5a3d":"#fff",color:sel?"#fff":"#374151",fontWeight:600,fontSize:13,display:"flex",alignItems:"center",gap:5,opacity:isPayer?0.85:1}},sel&&React.createElement("span",null,"✓"),p,isPayer&&React.createElement("span",{style:{fontSize:9,opacity:.8}},"💳"));})
-      ),
-      splitWith.length>1&&result.total&&React.createElement("div",{style:{marginTop:12,padding:10,background:"#f0fdf4",border:"1.5px solid #16a34a40",borderRadius:12,fontSize:13,color:"#166534",textAlign:"center",fontWeight:600}},`${brl(valorPorPessoa)} por pessoa (${splitWith.length})`)
-    ),
-    React.createElement("div",{style:{display:"flex",gap:8}},extraButton,
-      React.createElement("button",{onClick:onSave,style:{flex:1,padding:16,borderRadius:16,border:"none",background:"linear-gradient(135deg,#1a3a2a,#2d5a3d)",color:"#fff",fontSize:16,fontWeight:700}},saveLabel))
-  );
+function deleteLearning(merchant) {
+  const sheet = getAprendizadoSheet(SpreadsheetApp.getActiveSpreadsheet());
+  const data = sheet.getDataRange().getValues();
+  for (let i = data.length - 1; i >= 1; i--) if (String(data[i][0]) === merchant) { sheet.deleteRow(i + 1); return { ok: true }; }
+  return { ok: false };
 }
 
-function SetupView({onSave,toast_}){
-  const [url,setUrl]=useState("");const [testing,setTesting]=useState(false);
-  const handle=async()=>{
-    if(!url.trim()){toast_("Cole a URL","err");return;}
-    setTesting(true);
-    try{const r=await api(url.trim(),"ping");if(r.ok){toast_("✅ Conectado!");onSave(url.trim());}else throw new Error(r.error);}
-    catch(err){toast_("❌ "+err.message,"err");}finally{setTesting(false);}
-  };
-  return React.createElement(Wrap,{pb:20},
-    React.createElement("div",{style:{background:"linear-gradient(135deg,#1a3a2a,#2d5a3d)",padding:"40px 24px 28px",borderRadius:"0 0 28px 28px",color:"#fff"}},
-      React.createElement("div",{style:{fontSize:44,marginBottom:8}},"💰"),
-      React.createElement("div",{style:{fontFamily:"Fraunces",fontWeight:700,fontSize:28,lineHeight:1.1,marginBottom:6}},"GastoCasa"),
-      React.createElement("div",{style:{opacity:.8,fontSize:14}},"Cole a URL do Google Apps Script")
-    ),
-    React.createElement("div",{style:{padding:16}},React.createElement(Card,{title:"URL do Apps Script"},
-      React.createElement(InputEl,{value:url,onChange:setUrl,placeholder:"https://script.google.com/..."}),
-      React.createElement("button",{onClick:handle,disabled:testing,style:{marginTop:14,width:"100%",padding:14,borderRadius:14,border:"none",background:testing?"#9ca3af":"linear-gradient(135deg,#1a3a2a,#2d5a3d)",color:"#fff",fontWeight:700,fontSize:15,display:"flex",alignItems:"center",justifyContent:"center",gap:8}},testing&&React.createElement(Spinner,{size:16}),testing?"Testando...":"🔌 Conectar")
-    ))
-  );
+function addPayer(name) {
+  if (!name) return { ok: false };
+  const sheet = getConfigSheet(SpreadsheetApp.getActiveSpreadsheet());
+  const data = sheet.getDataRange().getValues();
+  for (let i = 1; i < data.length; i++) if (String(data[i][0]) === name) return { ok: true };
+  sheet.appendRow([name, new Date().toISOString()]);
+  return { ok: true };
 }
 
-function CaptureView({payers,lmap,cats,apiKey,imports,accounts,onSave,onSaveLinked,onBack,toast_}){
-  const [stage,setStage]=useState("pick");const [imageUrl,setImageUrl]=useState(null);const [b64,setB64]=useState(null);
-  const [result,setResult]=useState({merchant:"",total:"",date:today(),category:"Outros",items:[]});
-  const [payer,setPayer]=useState(payers[0]||"Eu");const [splitWith,setSplitWith]=useState([...payers]);
-  const [matches,setMatches]=useState([]);
-  const [pendingExp,setPendingExp]=useState(null);
-  const fileRef=useRef();
-  const handleFile=async(file)=>{
-    if(!file)return;if(!apiKey){toast_("⚠️ Configure a chave em ⚙️","err");return;}
-    setImageUrl(URL.createObjectURL(file));setStage("analyzing");
-    try{const img=await compress(file);setB64(img);
-      const r=await callClaude(img,"image/jpeg",lmap,cats,apiKey);
-      setResult({merchant:r.merchant||"",total:r.total!=null?String(r.total):"",date:r.date||today(),category:cats.find(c=>c.n===r.category)?.n||cats[0]?.n||"Outros",items:r.items||[]});
-      setStage("review");
-    }catch(err){toast_("⚠️ "+err.message,"err");setStage("manual");}
-  };
-  const handleSave=async()=>{
-    const v=parseFloat((result.total||"0").replace(",","."));
-    if(!v){toast_("Informe o valor","err");return;}
-    if(splitWith.length===0){toast_("Selecione quem divide","err");return;}
-    
-    // Tenta matching antes de salvar
-    const tempExp={merchant:result.merchant,total:v,date:result.date};
-    const found=findImportMatches(tempExp,imports||[],50);
-    
-    if(found.length>0){
-      // Mostra sugestão
-      setPendingExp({...result,total:v,payer,splitWith,imageBase64:b64,mimeType:"image/jpeg"});
-      setMatches(found);
-      setStage("matching");
-      return;
+function deletePayer(name) {
+  const sheet = getConfigSheet(SpreadsheetApp.getActiveSpreadsheet());
+  const data = sheet.getDataRange().getValues();
+  for (let i = data.length - 1; i >= 1; i--) if (String(data[i][0]) === name) { sheet.deleteRow(i + 1); return { ok: true }; }
+  return { ok: false };
+}
+
+function addCategory(cat) {
+  if (!cat || !cat.n) return { ok: false };
+  const sheet = getCategoriesSheet(SpreadsheetApp.getActiveSpreadsheet());
+  const data = sheet.getDataRange().getValues();
+  for (let i = 1; i < data.length; i++) {
+    if (String(data[i][0]) === cat.n) {
+      sheet.getRange(i + 1, 2).setValue(cat.i || "📦");
+      sheet.getRange(i + 1, 3).setValue(cat.c || "#94a3b8");
+      return { ok: true };
     }
-    
-    // Salva normalmente
-    setStage("saving");
-    await onSave({...result,total:v,payer,splitWith,imageBase64:b64,mimeType:"image/jpeg"});
-  };
-  
-  const handleLinkMatch=async(imp)=>{
-    setStage("saving");
-    const acc=accounts?.find(a=>a.id===imp.accountId);
-    // Salva expense e cria vínculo
-    const expWithLink={...pendingExp,account:acc?.name||"",importId:imp.id,payer:acc?.payer||pendingExp.payer};
-    await onSaveLinked(expWithLink,imp.id);
-  };
-  const handleSkipMatch=async()=>{
-    setStage("saving");
-    await onSave(pendingExp);
-  };
-  if(stage==="pick")return React.createElement(Wrap,{pb:20},React.createElement(Header,{title:"Novo gasto",onBack}),
-    React.createElement("div",{style:{padding:16}},
-      !apiKey&&React.createElement("div",{style:{background:"#fef3c7",border:"1.5px solid #f59e0b",borderRadius:14,padding:12,marginBottom:14,fontSize:12,color:"#78350f"}},"⚠️ Configure a chave da Anthropic em ⚙️ para usar IA."),
-      React.createElement("input",{ref:fileRef,type:"file",accept:"image/*",capture:"environment",style:{display:"none"},onChange:e=>handleFile(e.target.files[0])}),
-      React.createElement("button",{onClick:()=>fileRef.current.click(),style:{width:"100%",padding:28,borderRadius:20,border:"3px dashed #2d5a3d",background:"#fff",display:"flex",flexDirection:"column",alignItems:"center",gap:8,marginBottom:12,opacity:apiKey?1:0.6}},
-        React.createElement("span",{style:{fontSize:52}},"📷"),
-        React.createElement("span",{style:{fontWeight:700,color:"#1a3a2a",fontSize:16}},"Fotografar comprovante")
-      ),
-      React.createElement("button",{onClick:()=>setStage("manual"),style:{width:"100%",padding:16,borderRadius:16,border:"2px solid #e5e7eb",background:"#fff",fontWeight:600}},"✍️ Digitar manualmente")
-    )
-  );
-  if(stage==="analyzing")return React.createElement(Wrap,{pb:20},React.createElement(Header,{title:"Analisando...",onBack}),
-    React.createElement("div",{style:{display:"flex",flexDirection:"column",alignItems:"center",padding:60,gap:24}},
-      imageUrl&&React.createElement("img",{src:imageUrl,style:{width:130,height:130,objectFit:"cover",borderRadius:16}}),
-      React.createElement(Spinner,{size:48,color:"#2d5a3d"})
-    )
-  );
-  if(stage==="saving")return React.createElement(Wrap,{pb:20},React.createElement(Header,{title:"Salvando..."}),
-    React.createElement("div",{style:{display:"flex",flexDirection:"column",alignItems:"center",padding:60,gap:20}},React.createElement(Spinner,{size:48,color:"#2d5a3d"}))
-  );
-  if(stage==="matching")return React.createElement(Wrap,{pb:20},
-    React.createElement(Header,{title:"Possível vínculo encontrado",onBack:()=>setStage("review")}),
-    React.createElement("div",{style:{padding:16}},
-      React.createElement(MatchSuggestion,{matches,accounts:accounts||[],onSelect:handleLinkMatch,onSkip:handleSkipMatch})
-    )
-  );
-  return React.createElement(Wrap,{pb:20},React.createElement(Header,{title:"Revisar dados",onBack}),
-    React.createElement(ReviewForm,{imageUrl,result,setResult,payer,setPayer,splitWith,setSplitWith,payers,cats,onSave:handleSave})
-  );
+  }
+  sheet.appendRow([cat.n, cat.i || "📦", cat.c || "#94a3b8", new Date().toISOString()]);
+  return { ok: true };
 }
 
-function UploadProcessor({uploads,payers,lmap,cats,apiKey,scriptUrl,onSave,onDeleteUpload,onFinish,toast_}){
-  const [idx,setIdx]=useState(0);const [stage,setStage]=useState("loading");
-  const [b64,setB64]=useState(null);const [mimeType,setMimeType]=useState("image/jpeg");
-  const [imageUrl,setImageUrl]=useState(null);const [pdfFilename,setPdfFilename]=useState(null);
-  const [result,setResult]=useState({merchant:"",total:"",date:today(),category:"Outros",items:[]});
-  const [payer,setPayer]=useState(payers[0]||"Eu");const [splitWith,setSplitWith]=useState([...payers]);
-  useEffect(()=>{if(idx>=uploads.length){onFinish();return;}processCurrentFile();},[idx]);
-  const processCurrentFile=async()=>{
-    setStage("loading");setResult({merchant:"",total:"",date:today(),category:"Outros",items:[]});
-    setPayer(payers[0]||"Eu");setSplitWith([...payers]);setImageUrl(null);setPdfFilename(null);
-    try{
-      const r=await api(scriptUrl,"getUploadFile",{id:uploads[idx].id});
-      if(!r.ok)throw new Error(r.error||"Falha");
-      const isPdf=r.mimeType==="application/pdf";
-      let finalB64=r.base64,finalMime=r.mimeType;
-      if(!isPdf){finalB64=await recompressBase64(r.base64,r.mimeType);finalMime="image/jpeg";setImageUrl("data:image/jpeg;base64,"+finalB64);}
-      else{setPdfFilename(r.name||uploads[idx].name);}
-      setB64(finalB64);setMimeType(finalMime);setStage("analyzing");
-      try{const claude=await callClaude(finalB64,finalMime,lmap,cats,apiKey);
-        setResult({merchant:claude.merchant||"",total:claude.total!=null?String(claude.total):"",date:claude.date||today(),category:cats.find(c=>c.n===claude.category)?.n||cats[0]?.n||"Outros",items:claude.items||[]});
-      }catch(err){toast_("⚠️ IA falhou: "+err.message,"err");}
-      setStage("review");
-    }catch(err){toast_("⚠️ "+err.message,"err");setIdx(idx+1);}
-  };
-  const handleSave=async()=>{
-    const v=parseFloat((result.total||"0").replace(",","."));
-    if(!v){toast_("Informe o valor","err");return;}
-    if(splitWith.length===0){toast_("Selecione quem divide","err");return;}
-    setStage("saving");
-    await onSave({...result,total:v,payer,splitWith,imageBase64:b64,mimeType});
-    await onDeleteUpload(uploads[idx].id);setIdx(idx+1);
-  };
-  const handleSkip=()=>{if(!confirm("Pular este?"))return;setIdx(idx+1);};
-  const handleDiscard=async()=>{if(!confirm("Descartar?"))return;setStage("loading");await onDeleteUpload(uploads[idx].id);setIdx(idx+1);};
-  const subtitle=`${idx+1} de ${uploads.length}`;
-  if(stage==="loading")return React.createElement(Wrap,{pb:20},React.createElement(Header,{title:"Carregando...",subtitle,onBack:onFinish}),React.createElement("div",{style:{display:"flex",flexDirection:"column",alignItems:"center",padding:60,gap:20}},React.createElement(Spinner,{size:48,color:"#2d5a3d"})));
-  if(stage==="analyzing")return React.createElement(Wrap,{pb:20},React.createElement(Header,{title:"Analisando...",subtitle,onBack:onFinish}),
-    React.createElement("div",{style:{display:"flex",flexDirection:"column",alignItems:"center",padding:60,gap:24}},
-      imageUrl&&React.createElement("img",{src:imageUrl,style:{width:130,height:130,objectFit:"cover",borderRadius:16}}),
-      pdfFilename&&React.createElement("div",{style:{fontSize:64}},"📄"),
-      React.createElement(Spinner,{size:48,color:"#2d5a3d"})
-    )
-  );
-  if(stage==="saving")return React.createElement(Wrap,{pb:20},React.createElement(Header,{title:"Salvando...",subtitle}),React.createElement("div",{style:{display:"flex",flexDirection:"column",alignItems:"center",padding:60,gap:20}},React.createElement(Spinner,{size:48,color:"#2d5a3d"})));
-  const skipBtn=React.createElement("button",{onClick:handleSkip,style:{padding:16,borderRadius:16,border:"2px solid #e5e7eb",background:"#fff",color:"#6b7280",fontSize:14,fontWeight:600}},"⏭");
-  const discardBtn=React.createElement("button",{onClick:handleDiscard,style:{padding:16,borderRadius:16,border:"2px solid #fecaca",background:"#fff",color:"#dc2626",fontSize:14,fontWeight:600}},"🗑️");
-  return React.createElement(Wrap,{pb:20},React.createElement(Header,{title:"Revisar comprovante",subtitle,onBack:onFinish}),
-    React.createElement(ReviewForm,{imageUrl,pdfFilename,result,setResult,payer,setPayer,splitWith,setSplitWith,payers,cats,onSave:handleSave,saveLabel:idx+1<uploads.length?"💾 Próximo →":"💾 Finalizar",extraButton:React.createElement(React.Fragment,null,discardBtn,skipBtn)})
-  );
+function deleteCategory(name) {
+  const sheet = getCategoriesSheet(SpreadsheetApp.getActiveSpreadsheet());
+  const data = sheet.getDataRange().getValues();
+  for (let i = data.length - 1; i >= 1; i--) if (String(data[i][0]) === name) { sheet.deleteRow(i + 1); return { ok: true }; }
+  return { ok: false };
 }
 
-function HistoryView({expenses,cats,accounts,onBack,onDelete,onUnlink}){
-  const [filterCat,setFilterCat]=useState("Todas");const [filterMonth,setFilterMonth]=useState("all");
-  const months=[...new Set(expenses.map(e=>e.date?.slice(0,7)))].sort().reverse();
-  const filtered=expenses.filter(e=>{
-    if(filterCat!=="Todas"&&e.category!==filterCat)return false;
-    if(filterMonth!=="all"&&e.date?.slice(0,7)!==filterMonth)return false;
-    return true;
-  });
-  const total=filtered.reduce((s,e)=>s+(+e.total||0),0);
-  return React.createElement(Wrap,{pb:80},
-    React.createElement("div",{style:{background:"linear-gradient(135deg,#1a3a2a,#2d5a3d)",padding:"20px 16px 24px",borderRadius:"0 0 28px 28px"}},
-      React.createElement("div",{style:{display:"flex",alignItems:"center",gap:12,marginBottom:12}},React.createElement(BackBtn,{onClick:onBack}),React.createElement("span",{style:{color:"#fff",fontWeight:700,fontSize:18,fontFamily:"Fraunces"}},"Histórico")),
-      React.createElement("div",{style:{color:"rgba(255,255,255,.65)",fontSize:13}},filtered.length+" transações"),
-      React.createElement("div",{style:{color:"#fff",fontSize:28,fontFamily:"Fraunces",fontWeight:700}},brl(total))
-    ),
-    React.createElement("div",{style:{padding:"14px 16px 0"}},
-      React.createElement("div",{style:{overflowX:"auto",display:"flex",gap:8,paddingBottom:8}},["all",...months].map(m=>React.createElement("button",{key:m,onClick:()=>setFilterMonth(m),style:{padding:"6px 14px",borderRadius:20,border:"none",whiteSpace:"nowrap",background:filterMonth===m?"#1a3a2a":"#fff",color:filterMonth===m?"#fff":"#374151",fontWeight:600,fontSize:12}},m==="all"?"Todos":new Date(m+"-15").toLocaleDateString("pt-BR",{month:"short",year:"2-digit"})))),
-      React.createElement("div",{style:{overflowX:"auto",display:"flex",gap:8,paddingBottom:12}},["Todas",...cats.map(c=>c.n)].map(c=>React.createElement("button",{key:c,onClick:()=>setFilterCat(c),style:{padding:"6px 12px",borderRadius:20,border:"none",whiteSpace:"nowrap",background:filterCat===c?"#1a3a2a":"#f3f4f6",color:filterCat===c?"#fff":"#374151",fontWeight:600,fontSize:12}},c==="Todas"?"Todas":`${getCat(cats,c).i} ${c}`))),
-      React.createElement(Card,null,
-        filtered.length===0&&React.createElement("div",{style:{textAlign:"center",color:"#9ca3af",padding:20,fontSize:14}},"Nenhum gasto"),
-        filtered.map(e=>React.createElement("div",{key:e.id,style:{display:"flex",alignItems:"center",gap:8}},
-          React.createElement("div",{style:{flex:1}},React.createElement(ExpRow,{e,cats,accounts})),
-          e.importId&&onUnlink&&React.createElement("button",{onClick:()=>{if(confirm(`Desvincular do lançamento bancário?`))onUnlink(e.id);},title:"Desvincular do lançamento bancário",style:{background:"none",border:"none",fontSize:14,padding:4,color:"#f59e0b"}},"🔓"),
-          React.createElement("button",{onClick:()=>{if(confirm(`Excluir ${brl(e.total)}?`))onDelete(e.id);},style:{background:"none",border:"none",fontSize:18,padding:4,color:"#dc2626"}},"🗑️")
-        ))
-      )
-    )
-  );
-}
-
-function CategoryEditor({apiKey,cats,onAdd,onCancel,toast_}){
-  const [name,setName]=useState("");const [icons,setIcons]=useState([]);const [selectedIcon,setSelectedIcon]=useState("");
-  const [color,setColor]=useState(COLOR_PALETTE[Math.floor(Math.random()*COLOR_PALETTE.length)]);
-  const [loading,setLoading]=useState(false);const [customIcon,setCustomIcon]=useState("");
-  const fetchIcons=async()=>{
-    if(!name.trim()){toast_("Digite o nome","err");return;}if(!apiKey){toast_("Configure chave em ⚙️","err");return;}
-    setLoading(true);
-    try{const emojis=await suggestEmojis(name.trim(),apiKey);setIcons(emojis);setSelectedIcon(emojis[0]||"📦");}
-    catch(err){toast_("⚠️ "+err.message,"err");setIcons(["📦","🎯","⭐"]);setSelectedIcon("📦");}finally{setLoading(false);}
-  };
-  const handleAdd=()=>{
-    const finalIcon=customIcon.trim()||selectedIcon;
-    if(!name.trim()){toast_("Digite o nome","err");return;}
-    if(!finalIcon){toast_("Escolha um ícone","err");return;}
-    if(cats.find(c=>c.n===name.trim())){toast_("Já existe","err");return;}
-    onAdd({n:name.trim(),i:finalIcon,c:color});
-  };
-  return React.createElement(Card,{title:"➕ Nova categoria"},
-    React.createElement(Label,null,"Nome"),
-    React.createElement("div",{style:{display:"flex",gap:8}},
-      React.createElement(InputEl,{value:name,onChange:setName,placeholder:"Ex: Pet, Viagem..."}),
-      React.createElement("button",{onClick:fetchIcons,disabled:loading||!name.trim(),style:{padding:"10px 14px",borderRadius:12,background:loading?"#9ca3af":"#7c3aed",color:"#fff",border:"none",fontWeight:700,fontSize:12,whiteSpace:"nowrap"}},loading?"...":"🤖 Ícones")
-    ),
-    icons.length>0&&React.createElement("div",null,
-      React.createElement(Label,null,"Sugestões"),
-      React.createElement("div",{style:{display:"flex",gap:8}},icons.map((emo,idx)=>React.createElement("button",{key:idx,onClick:()=>{setSelectedIcon(emo);setCustomIcon("");},style:{flex:1,padding:14,borderRadius:14,border:"2px solid",borderColor:selectedIcon===emo&&!customIcon?color:"#e5e7eb",background:selectedIcon===emo&&!customIcon?color+"18":"#fff",fontSize:32}},emo)))
-    ),
-    React.createElement(Label,null,"Ou ícone próprio"),React.createElement(InputEl,{value:customIcon,onChange:setCustomIcon,placeholder:"📦",maxLength:4}),
-    React.createElement(Label,null,"Cor"),
-    React.createElement("div",{style:{display:"flex",gap:6,flexWrap:"wrap"}},COLOR_PALETTE.map(col=>React.createElement("button",{key:col,onClick:()=>setColor(col),style:{width:36,height:36,borderRadius:"50%",background:col,border:color===col?"3px solid #1a1a1a":"3px solid transparent"}}))),
-    React.createElement("div",{style:{display:"flex",gap:8,marginTop:14}},
-      React.createElement("button",{onClick:onCancel,style:{flex:1,padding:12,borderRadius:12,background:"#f3f4f6",color:"#374151",border:"none",fontWeight:700,fontSize:14}},"Cancelar"),
-      React.createElement("button",{onClick:handleAdd,style:{flex:2,padding:12,borderRadius:12,background:"linear-gradient(135deg,#1a3a2a,#2d5a3d)",color:"#fff",border:"none",fontWeight:700,fontSize:14}},"✓ Adicionar")
-    )
-  );
-}
-
-function SettingsView({payers,cfg,lmap,cats,apiKey,setApiKey,uploadFolderUrl,onAddPayer,onDeletePayer,onChangeUrl,onDeleteLearning,onAddCategory,onDeleteCategory,onBack,toast_,onRefresh,syncing}){
-  const [newPayer,setNewPayer]=useState("");const [url,setUrl]=useState(cfg.scriptUrl||"");
-  const [keyInput,setKeyInput]=useState(apiKey||"");const [showKey,setShowKey]=useState(false);
-  const [editingCategory,setEditingCategory]=useState(false);
-  return React.createElement(Wrap,{pb:80},
-    React.createElement(Header,{title:"Configurações",onBack}),
-    React.createElement("div",{style:{padding:16}},
-      React.createElement(Card,{title:"📥 Pasta UPLOAD do Drive"},
-        React.createElement("div",{style:{fontSize:12,color:"#6b7280",marginBottom:10}},"Arraste imagens ou PDFs nessa pasta. Depois abra o app."),
-        uploadFolderUrl?React.createElement("a",{href:uploadFolderUrl,target:"_blank",style:{display:"block",padding:"10px 14px",borderRadius:12,background:"#7c3aed",color:"#fff",textDecoration:"none",fontWeight:700,fontSize:13,textAlign:"center"}},"🔗 Abrir pasta no Drive"):React.createElement("div",{style:{fontSize:11,color:"#9ca3af"}},"Pasta criada após o primeiro upload.")
-      ),
-      React.createElement(Card,{title:"🤖 Chave da Anthropic (IA)"},
-        React.createElement("div",{style:{display:"flex",gap:6}},
-          React.createElement(InputEl,{value:keyInput,onChange:setKeyInput,placeholder:"sk-ant-...",type:showKey?"text":"password"}),
-          React.createElement("button",{onClick:()=>setShowKey(!showKey),style:{padding:"0 10px",borderRadius:12,background:"#f3f4f6",border:"none",fontSize:16}},showKey?"🙈":"👁️")
-        ),
-        React.createElement("button",{onClick:()=>{setApiKey(keyInput.trim());toast_("✅ Salva!");},style:{marginTop:10,padding:"10px 16px",borderRadius:12,background:"#1a3a2a",color:"#fff",border:"none",fontWeight:700,fontSize:13}},"Salvar"),
-        apiKey&&React.createElement("div",{style:{marginTop:8,fontSize:11,color:"#16a34a"}},"✅ Configurada")
-      ),
-      React.createElement(Card,{title:"🔄 Sincronização"},
-        React.createElement("button",{onClick:onRefresh,disabled:syncing,style:{width:"100%",padding:12,borderRadius:12,background:syncing?"#e5e7eb":"#1a3a2a",color:syncing?"#6b7280":"#fff",border:"none",fontWeight:700,fontSize:14}},syncing?"Sincronizando...":"🔄 Atualizar agora")
-      ),
-      React.createElement(Card,{title:`🏷️ Categorias (${cats.length})`},
-        React.createElement("div",{style:{maxHeight:280,overflowY:"auto",marginBottom:12}},cats.map(cat=>React.createElement("div",{key:cat.n,style:{display:"flex",alignItems:"center",gap:10,padding:"8px 0",borderBottom:"1px solid #f0ede6"}},
-          React.createElement("div",{style:{width:36,height:36,borderRadius:12,background:cat.c+"20",display:"flex",alignItems:"center",justifyContent:"center",fontSize:18}},cat.i),
-          React.createElement("div",{style:{flex:1,fontWeight:600,fontSize:13}},cat.n),
-          React.createElement("button",{onClick:()=>{if(confirm(`Excluir "${cat.n}"?`))onDeleteCategory(cat.n);},style:{background:"none",border:"none",fontSize:16,padding:4}},"🗑️")
-        ))),
-        !editingCategory&&React.createElement("button",{onClick:()=>setEditingCategory(true),style:{width:"100%",padding:12,borderRadius:12,background:"#fff",border:"2px dashed #2d5a3d",color:"#1a3a2a",fontWeight:700,fontSize:14}},"+ Nova categoria"),
-        editingCategory&&React.createElement(CategoryEditor,{apiKey,cats,onAdd:cat=>{onAddCategory(cat);setEditingCategory(false);},onCancel:()=>setEditingCategory(false),toast_})
-      ),
-      React.createElement(Card,{title:"👤 Pessoas da casa"},
-        React.createElement("div",{style:{display:"flex",flexWrap:"wrap",gap:8,marginBottom:12}},payers.map(p=>React.createElement("div",{key:p,style:{display:"flex",alignItems:"center",gap:6,background:"#f3f4f6",borderRadius:20,padding:"6px 14px"}},
-          React.createElement("span",{style:{fontSize:13,fontWeight:600}},p),
-          payers.length>1&&React.createElement("button",{onClick:()=>onDeletePayer(p),style:{background:"none",border:"none",color:"#9ca3af",fontSize:16,padding:0}},"×")
-        ))),
-        React.createElement("div",{style:{display:"flex",gap:8}},React.createElement(InputEl,{value:newPayer,onChange:setNewPayer,placeholder:"Nome"}),
-          React.createElement("button",{onClick:()=>{if(newPayer.trim()){onAddPayer(newPayer.trim());setNewPayer("");}},style:{padding:"10px 16px",borderRadius:12,background:"#1a3a2a",color:"#fff",border:"none",fontWeight:700}},"+ Add"))
-      ),
-      React.createElement(Card,{title:`🧠 Aprendizado (${Object.keys(lmap).length})`},
-        React.createElement("div",{style:{maxHeight:220,overflowY:"auto"}},Object.entries(lmap).map(([m,c])=>React.createElement("div",{key:m,style:{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"8px 0",borderBottom:"1px solid #f0ede6"}},
-          React.createElement("div",{style:{flex:1,minWidth:0}},React.createElement("div",{style:{fontSize:13,fontWeight:600,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}},m),React.createElement("div",{style:{fontSize:11,color:"#6b7280"}},`${getCat(cats,c).i} ${c}`)),
-          React.createElement("button",{onClick:()=>onDeleteLearning(m),style:{background:"none",border:"none",fontSize:16,padding:4}},"🗑️")
-        )))
-      ),
-      React.createElement(Card,{title:"🔗 Alterar URL"},
-        React.createElement(InputEl,{value:url,onChange:setUrl}),
-        React.createElement("button",{onClick:()=>onChangeUrl(url),style:{marginTop:10,padding:"10px 16px",borderRadius:12,background:"#1a3a2a",color:"#fff",border:"none",fontWeight:700,fontSize:13}},"Atualizar")
-      )
-    )
-  );
-}
-
-function App(){
-  const [view,setView]=useState("home");
-  const [cfg,setCfg]=useState(()=>ld("cfg",{scriptUrl:""}));
-  const [apiKey,setApiKey]=useState(()=>ld("apiKey",""));
-  const [expenses,setExpenses]=useState(()=>ld("exp",[]));
-  const [lmap,setLmap]=useState(()=>ld("lmap",{}));
-  const [payers,setPayers]=useState(()=>ld("payers",["Eu"]));
-  const [cats,setCats]=useState(()=>ld("cats",DEFAULT_CATS));
-  const [accounts,setAccounts]=useState(()=>ld("accounts",[]));
-  const [imports,setImports]=useState(()=>ld("imports",[]));
-  const [pendingUploads,setPendingUploads]=useState([]);
-  const [uploadFolderUrl,setUploadFolderUrl]=useState("");
-  const [toast,setToast]=useState(null);
-  const [syncing,setSyncing]=useState(false);
-
-  useEffect(()=>sv("cfg",cfg),[cfg]);
-  useEffect(()=>sv("apiKey",apiKey),[apiKey]);
-  useEffect(()=>sv("exp",expenses),[expenses]);
-  useEffect(()=>sv("lmap",lmap),[lmap]);
-  useEffect(()=>sv("payers",payers),[payers]);
-  useEffect(()=>sv("cats",cats),[cats]);
-  useEffect(()=>sv("accounts",accounts),[accounts]);
-  useEffect(()=>sv("imports",imports),[imports]);
-
-  const toast_=useCallback((msg,type="ok")=>{setToast({msg,type});setTimeout(()=>setToast(null),3500);},[]);
-
-  const checkUploads=useCallback(async()=>{
-    if(!cfg.scriptUrl)return;
-    try{const r=await api(cfg.scriptUrl,"listUploads");if(r.ok){setPendingUploads(r.files||[]);if(r.folderUrl)setUploadFolderUrl(r.folderUrl);}}catch{}
-  },[cfg.scriptUrl]);
-
-  const syncDown=useCallback(async()=>{
-    if(!cfg.scriptUrl)return;
-    setSyncing(true);
-    try{
-      const r=await api(cfg.scriptUrl,"getAll");
-      if(r.ok){
-        setExpenses(r.expenses||[]);
-        setLmap(r.learning||{});
-        if(r.payers?.length)setPayers(r.payers);
-        if(r.categories?.length)setCats(r.categories);
-        setAccounts(r.accounts||[]);
-        setImports(r.imports||[]);
-      }else throw new Error(r.error);
-      await checkUploads();
-    }catch(err){toast_("⚠️ "+err.message,"err");}
-    finally{setSyncing(false);}
-  },[cfg.scriptUrl,toast_,checkUploads]);
-
-  useEffect(()=>{if(cfg.scriptUrl)syncDown();},[cfg.scriptUrl]);
-
-  const saveExpense=async(exp)=>{
-    const e={...exp,id:Date.now()+"",at:new Date().toISOString()};
-    setExpenses(p=>[e,...p]);
-    if(e.merchant&&e.category)setLmap(p=>({...p,[e.merchant]:e.category}));
-    try{const r=await api(cfg.scriptUrl,"save",{expense:e});if(!r.ok)throw new Error(r.error);if(r.driveUrl)setExpenses(p=>p.map(x=>x.id===e.id?{...x,driveUrl:r.driveUrl}:x));toast_("✅ Salvo!");}
-    catch(err){toast_("⚠️ Local: "+err.message,"err");}
-    return e;
-  };
-  
-  // Salva expense E vincula com import bancário existente
-  const saveLinkedExpense=async(exp,importId)=>{
-    const e={...exp,id:Date.now()+"",at:new Date().toISOString()};
-    setExpenses(p=>[e,...p]);
-    if(e.merchant&&e.category)setLmap(p=>({...p,[e.merchant]:e.category}));
-    setImports(p=>p.map(i=>i.id===importId?{...i,status:"vinculada",expenseId:e.id}:i));
-    try{
-      const r=await api(cfg.scriptUrl,"save",{expense:e});
-      if(!r.ok)throw new Error(r.error);
-      if(r.driveUrl)setExpenses(p=>p.map(x=>x.id===e.id?{...x,driveUrl:r.driveUrl}:x));
-      // Faz o link no backend
-      await api(cfg.scriptUrl,"linkExpense",{expenseId:e.id,importId,accountName:e.account});
-      toast_("✅ Salvo e vinculado!");
-    }catch(err){toast_("⚠️ Local: "+err.message,"err");}
-    return e;
-  };
-  
-  const unlinkExpenseFn=async(expenseId)=>{
-    const exp=expenses.find(e=>e.id===expenseId);
-    if(!exp||!exp.importId)return;
-    const oldImpId=exp.importId;
-    setExpenses(p=>p.map(e=>e.id===expenseId?{...e,importId:""}:e));
-    setImports(p=>p.map(i=>i.id===oldImpId?{...i,status:"pendente",expenseId:""}:i));
-    try{await api(cfg.scriptUrl,"unlinkExpense",{expenseId});toast_("✅ Desvinculado");}
-    catch(err){toast_("⚠️ "+err.message,"err");}
-  };
-  
-  const saveAndReturnHome=async(exp)=>{await saveExpense(exp);setView("home");};
-  const saveLinkedAndReturnHome=async(exp,importId)=>{await saveLinkedExpense(exp,importId);setView("home");};
-  const deleteUploadFile=async(id)=>{try{await api(cfg.scriptUrl,"deleteUpload",{id});setPendingUploads(p=>p.filter(u=>u.id!==id));}catch{}};
-  const finishUploadProcessing=()=>{setView("home");checkUploads();toast_("✅ Concluído!");};
-  const deleteExpense=async(id)=>{setExpenses(p=>p.filter(e=>e.id!==id));try{await api(cfg.scriptUrl,"deleteExpense",{id});}catch{}toast_("✅ Excluído");};
-  const addPayer=async(name)=>{setPayers(p=>[...p,name]);try{await api(cfg.scriptUrl,"addPayer",{name});}catch{}};
-  const deletePayer=async(name)=>{setPayers(p=>p.filter(x=>x!==name));try{await api(cfg.scriptUrl,"deletePayer",{name});}catch{}};
-  const deleteLearning=async(merchant)=>{setLmap(p=>{const n={...p};delete n[merchant];return n;});try{await api(cfg.scriptUrl,"deleteLearning",{merchant});}catch{}};
-  const addCategory=async(cat)=>{setCats(p=>[...p,cat]);try{await api(cfg.scriptUrl,"addCategory",{category:cat});toast_("✅ Categoria criada!");}catch(err){toast_("⚠️ Local","err");}};
-  const deleteCategory=async(name)=>{setCats(p=>p.filter(c=>c.n!==name));try{await api(cfg.scriptUrl,"deleteCategory",{name});toast_("✅ Removida");}catch{}};
-  const changeUrl=(newUrl)=>{if(!newUrl?.trim())return;setCfg({scriptUrl:newUrl.trim()});setExpenses([]);setLmap({});setPayers(["Eu"]);setCats(DEFAULT_CATS);setAccounts([]);setImports([]);toast_("🔄 URL atualizada!");};
-
-  // ─── ACCOUNTS / IMPORTS ─────────────────────────────
-  const addAccount=async(acc)=>{
-    try{const r=await api(cfg.scriptUrl,"addAccount",{account:acc});
-      if(r.ok){setAccounts(p=>[...p,{...acc,id:r.id}]);toast_("✅ Conta criada!");return r;}
-      throw new Error(r.error);
-    }catch(err){toast_("⚠️ "+err.message,"err");return null;}
-  };
-  const deleteAccountFn=async(id)=>{
-    setAccounts(p=>p.filter(a=>a.id!==id));
-    try{await api(cfg.scriptUrl,"deleteAccount",{id});toast_("✅ Removida");}catch{}
-  };
-  const uploadCsv=async(items)=>{
-    try{
-      // Auto-vincula matches fortes ANTES de mandar
-      const enrichedItems=items.map(it=>{
-        if(it.status!=="pendente")return it;
-        const matches=findExpenseMatches(it,expenses,85); // só matches fortes
-        if(matches.length>0){
-          // Auto-vincula
-          return {...it,_autoLinkExpenseId:matches[0].exp.id};
-        }
-        return it;
-      });
-      
-      const r=await api(cfg.scriptUrl,"addImports",{imports:enrichedItems.map(({_autoLinkExpenseId,...rest})=>rest)});
-      if(!r.ok)throw new Error(r.error);
-      
-      // Após sync, faz os links automáticos
-      await syncDown();
-      
-      // Pega imports recém-criados (matched por hash)
-      const linksToCreate=enrichedItems.filter(i=>i._autoLinkExpenseId);
-      if(linksToCreate.length>0){
-        // Re-fetch para pegar os IDs corretos do backend
-        const fresh=await api(cfg.scriptUrl,"getAll");
-        if(fresh.ok){
-          const accById=Object.fromEntries(accounts.map(a=>[a.id,a]));
-          for(const orig of linksToCreate){
-            const imp=(fresh.imports||[]).find(i=>i.hash===orig.hash);
-            if(!imp)continue;
-            const acc=accById[imp.accountId];
-            try{
-              await api(cfg.scriptUrl,"linkExpense",{
-                expenseId:orig._autoLinkExpenseId,
-                importId:imp.id,
-                accountName:acc?.name||""
-              });
-            }catch{}
-          }
-          await syncDown();
-        }
+// ─── CONTAS ─────────────────────────────────────────────────
+function addAccount(acc) {
+  if (!acc || !acc.name) return { ok: false, error: "Nome obrigatório" };
+  const sheet = getContasSheet(SpreadsheetApp.getActiveSpreadsheet());
+  const id = acc.id || ("acc_" + Date.now());
+  if (acc.id) {
+    // update
+    const data = sheet.getDataRange().getValues();
+    for (let i = 1; i < data.length; i++) {
+      if (String(data[i][0]) === acc.id) {
+        sheet.getRange(i+1, 2, 1, 5).setValues([[acc.name, acc.type || "card", acc.payer || "", acc.bank || "", acc.color || "#7c3aed"]]);
+        return { ok: true, id };
       }
-      
-      const linked=linksToCreate.length;
-      const msg=linked>0?` (${linked} vinculadas automaticamente)`:"";
-      toast_(`✅ ${r.added||0} importadas${msg}`);
-      return r;
-    }catch(err){toast_("⚠️ "+err.message,"err");return null;}
-  };
-  const updateImport=async(id,updates)=>{
-    setImports(p=>p.map(i=>i.id===id?{...i,...updates}:i));
-    try{await api(cfg.scriptUrl,"updateImport",{id,updates});}catch(err){toast_("⚠️ Erro: "+err.message,"err");}
-  };
-  const deleteImportFn=async(id)=>{
-    setImports(p=>p.filter(i=>i.id!==id));
-    try{await api(cfg.scriptUrl,"deleteImport",{id});}catch{}
-  };
-  const launchImports=async(ids)=>{
-    const payerByAccount={};
-    const accountNameById={};
-    accounts.forEach(a=>{payerByAccount[a.id]=a.payer;accountNameById[a.id]=a.name;});
-    try{const r=await api(cfg.scriptUrl,"launchImports",{ids,payerByAccount,accountNameById});
-      if(r.ok){toast_(`✅ ${r.launched} despesa(s) lançada(s)!`);await syncDown();return r;}
-      throw new Error(r.error);
-    }catch(err){toast_("⚠️ "+err.message,"err");return null;}
-  };
-
-  if(!cfg.scriptUrl)return React.createElement(React.Fragment,null,toast&&React.createElement(Toast,{t:toast}),React.createElement(SetupView,{toast_,onSave:url=>setCfg({scriptUrl:url})}));
-  const RouteWrap=({children})=>React.createElement(React.Fragment,null,toast&&React.createElement(Toast,{t:toast}),children);
-
-  if(view==="capture")return React.createElement(RouteWrap,null,React.createElement(CaptureView,{payers,lmap,cats,apiKey,imports,accounts,onSave:saveAndReturnHome,onSaveLinked:saveLinkedAndReturnHome,onBack:()=>setView("home"),toast_}));
-  if(view==="upload")return React.createElement(RouteWrap,null,React.createElement(UploadProcessor,{uploads:pendingUploads,payers,lmap,cats,apiKey,scriptUrl:cfg.scriptUrl,onSave:saveExpense,onDeleteUpload:deleteUploadFile,onFinish:finishUploadProcessing,toast_}));
-  if(view==="history")return React.createElement(RouteWrap,null,React.createElement(HistoryView,{expenses,cats,accounts,onBack:()=>setView("home"),onDelete:deleteExpense,onUnlink:unlinkExpenseFn}));
-  if(view==="dashboard")return React.createElement(RouteWrap,null,React.createElement(DashboardView,{expenses,cats,payers,accounts,onBack:()=>setView("home")}));
-  if(view==="import")return React.createElement(RouteWrap,null,React.createElement(ImportView,{accounts,imports,expenses,cats,payers,lmap,scriptUrl:cfg.scriptUrl,onAddAccount:addAccount,onDeleteAccount:deleteAccountFn,onUploadCsv:uploadCsv,onUpdateImport:updateImport,onDeleteImport:deleteImportFn,onLaunchImports:launchImports,onBack:()=>setView("home"),toast_}));
-  if(view==="settings")return React.createElement(RouteWrap,null,React.createElement(SettingsView,{payers,cfg,lmap,cats,apiKey,setApiKey,uploadFolderUrl,onAddPayer:addPayer,onDeletePayer:deletePayer,onChangeUrl:changeUrl,onDeleteLearning:deleteLearning,onAddCategory:addCategory,onDeleteCategory:deleteCategory,onBack:()=>setView("home"),toast_,onRefresh:syncDown,syncing}));
-
-  // HOME
-  const now=new Date();
-  const mExp=expenses.filter(e=>{const d=new Date(e.date+"T12:00");return d.getMonth()===now.getMonth()&&d.getFullYear()===now.getFullYear();});
-  const mTotal=mExp.reduce((s,e)=>s+(+e.total||0),0);
-  const lmExp=expenses.filter(e=>{const d=new Date(e.date+"T12:00"),lm=new Date(now.getFullYear(),now.getMonth()-1,1);return d.getMonth()===lm.getMonth()&&d.getFullYear()===lm.getFullYear();});
-  const lmTotal=lmExp.reduce((s,e)=>s+(+e.total||0),0);
-  const diff=mTotal-lmTotal;
-  const pendingImports=imports.filter(i=>i.status==="pendente").length;
-
-  return React.createElement(Wrap,null,
-    toast&&React.createElement(Toast,{t:toast}),
-    React.createElement("div",{style:{background:"linear-gradient(135deg,#1a3a2a,#2d5a3d)",padding:"28px 20px 36px",borderRadius:"0 0 32px 32px"}},
-      React.createElement("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}},
-        React.createElement("div",null,
-          React.createElement("div",{style:{color:"rgba(255,255,255,.65)",fontSize:13,marginBottom:4}},new Date().toLocaleDateString("pt-BR",{month:"long",year:"numeric"})),
-          React.createElement("div",{style:{color:"#fff",fontSize:36,fontFamily:"Fraunces",fontWeight:700,lineHeight:1}},brl(mTotal)),
-          lmTotal>0&&React.createElement("div",{style:{color:diff>0?"#fca5a5":"#86efac",fontSize:13,marginTop:6}},(diff>0?"▲ +":"▼ ")+brl(Math.abs(diff))+" vs mês anterior")
-        ),
-        React.createElement("div",{style:{display:"flex",gap:8}},
-          React.createElement("button",{onClick:syncDown,disabled:syncing,style:{background:"rgba(255,255,255,.18)",border:"none",borderRadius:14,padding:"10px 12px",color:"#fff",fontSize:18,display:"flex",alignItems:"center"}},syncing?React.createElement(Spinner,{size:18}):React.createElement("span",null,"🔄")),
-          React.createElement("button",{onClick:()=>setView("settings"),style:{background:"rgba(255,255,255,.18)",border:"none",borderRadius:14,padding:"10px 14px",color:"#fff",fontSize:18}},"⚙️")
-        )
-      )
-    ),
-    React.createElement("div",{style:{padding:"16px 16px 0"}},
-      pendingUploads.length>0&&React.createElement("button",{onClick:()=>setView("upload"),className:"pulse",style:{width:"100%",padding:"16px 18px",borderRadius:18,border:"none",background:"linear-gradient(135deg,#f59e0b,#ea580c)",color:"#fff",fontWeight:700,fontSize:14,marginBottom:14,display:"flex",alignItems:"center",justifyContent:"space-between",boxShadow:"0 4px 16px rgba(234,88,12,.35)"}},
-        React.createElement("div",{style:{display:"flex",alignItems:"center",gap:10}},React.createElement("span",{style:{fontSize:24}},"📥"),React.createElement("div",{style:{textAlign:"left"}},React.createElement("div",{style:{fontSize:15}},`${pendingUploads.length} comprovante${pendingUploads.length>1?"s":""} para revisar`),React.createElement("div",{style:{fontSize:11,opacity:.85}},"Da pasta upload do Drive"))),
-        React.createElement("span",{style:{fontSize:18}},"→")
-      ),
-
-      pendingImports>0&&React.createElement("button",{onClick:()=>setView("import"),style:{width:"100%",padding:"16px 18px",borderRadius:18,border:"none",background:"linear-gradient(135deg,#2563eb,#1e40af)",color:"#fff",fontWeight:700,fontSize:14,marginBottom:14,display:"flex",alignItems:"center",justifyContent:"space-between",boxShadow:"0 4px 16px rgba(37,99,235,.3)"}},
-        React.createElement("div",{style:{display:"flex",alignItems:"center",gap:10}},React.createElement("span",{style:{fontSize:24}},"💳"),React.createElement("div",{style:{textAlign:"left"}},React.createElement("div",{style:{fontSize:15}},`${pendingImports} importação${pendingImports>1?"ões":""} pendente${pendingImports>1?"s":""}`),React.createElement("div",{style:{fontSize:11,opacity:.85}},"Aguardando revisão"))),
-        React.createElement("span",{style:{fontSize:18}},"→")
-      ),
-
-      React.createElement("div",{style:{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:14}},
-        React.createElement("button",{onClick:()=>setView("dashboard"),style:{padding:"16px 14px",borderRadius:18,border:"none",background:"linear-gradient(135deg,#7c3aed,#5b21b6)",color:"#fff",fontWeight:700,boxShadow:"0 4px 16px rgba(124,58,237,.3)",cursor:"pointer",textAlign:"left"}},
-          React.createElement("div",{style:{fontSize:24,marginBottom:4}},"📊"),
-          React.createElement("div",{style:{fontSize:14}},"Dashboard"),
-          React.createElement("div",{style:{fontSize:10,opacity:.85,fontWeight:500}},"Análises completas")
-        ),
-        React.createElement("button",{onClick:()=>setView("import"),style:{padding:"16px 14px",borderRadius:18,border:"none",background:"linear-gradient(135deg,#0891b2,#0e7490)",color:"#fff",fontWeight:700,boxShadow:"0 4px 16px rgba(8,145,178,.3)",cursor:"pointer",textAlign:"left"}},
-          React.createElement("div",{style:{fontSize:24,marginBottom:4}},"💳"),
-          React.createElement("div",{style:{fontSize:14}},"Importar"),
-          React.createElement("div",{style:{fontSize:10,opacity:.85,fontWeight:500}},"Cartões e contas")
-        )
-      ),
-
-      React.createElement("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}},
-        React.createElement("h3",{style:{margin:0,fontSize:15,fontWeight:700}},"Recentes"),
-        React.createElement("button",{onClick:()=>setView("history"),style:{background:"none",border:"none",color:"#2d5a3d",fontWeight:600,fontSize:13}},"Ver tudo →")
-      ),
-      React.createElement(Card,null,
-        expenses.length===0&&React.createElement("div",{style:{textAlign:"center",color:"#9ca3af",padding:20,fontSize:14}},"Nenhum gasto ainda"),
-        expenses.slice(0,8).map(e=>React.createElement(ExpRow,{key:e.id,e,cats,accounts}))
-      )
-    ),
-    React.createElement("div",{style:{position:"fixed",bottom:0,left:"50%",transform:"translateX(-50%)",width:"100%",maxWidth:430,background:"#fff",borderTop:"1px solid #e5e7eb",display:"flex",justifyContent:"space-around",alignItems:"center",padding:"8px 0 18px",zIndex:100}},
-      [{icon:"🏠",label:"Início",v:"home"},{icon:"📊",label:"Dashboard",v:"dashboard"},{icon:"💳",label:"Importar",v:"import"},{icon:"⚙️",label:"Config",v:"settings"}].map(b=>
-        React.createElement("button",{key:b.v,onClick:()=>setView(b.v),style:{background:"none",border:"none",display:"flex",flexDirection:"column",alignItems:"center",gap:2,padding:"4px 12px",color:view===b.v?"#1a3a2a":"#9ca3af"}},React.createElement("span",{style:{fontSize:22}},b.icon),React.createElement("span",{style:{fontSize:11,fontWeight:600}},b.label))
-      )
-    ),
-    React.createElement("button",{onClick:()=>setView("capture"),style:{position:"fixed",bottom:74,right:16,width:58,height:58,borderRadius:"50%",background:"linear-gradient(135deg,#1a3a2a,#2d5a3d)",color:"#fff",fontSize:30,border:"none",boxShadow:"0 6px 24px rgba(26,58,42,.45)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:50}},"+")
-  );
+    }
+  }
+  sheet.appendRow([id, acc.name, acc.type || "card", acc.payer || "", acc.bank || "", acc.color || "#7c3aed", new Date().toISOString()]);
+  return { ok: true, id };
 }
 
-ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(App));
-</script>
-</body>
+function deleteAccount(id) {
+  const sheet = getContasSheet(SpreadsheetApp.getActiveSpreadsheet());
+  const data = sheet.getDataRange().getValues();
+  for (let i = data.length - 1; i >= 1; i--) if (String(data[i][0]) === String(id)) { sheet.deleteRow(i + 1); return { ok: true }; }
+  return { ok: false };
+}
+
+// ─── IMPORTS ────────────────────────────────────────────────
+function addImports(arr) {
+  if (!arr || !arr.length) return { ok: true, added: 0 };
+  const sheet = getImportsSheet(SpreadsheetApp.getActiveSpreadsheet());
+  const existing = sheet.getDataRange().getValues();
+  const existingHashes = new Set();
+  for (let i = 1; i < existing.length; i++) if (existing[i][11]) existingHashes.add(String(existing[i][11]));
+  
+  const rows = [];
+  let added = 0;
+  for (const imp of arr) {
+    if (imp.hash && existingHashes.has(imp.hash)) continue; // dedupe by hash
+    const id = imp.id || ("imp_" + Date.now() + "_" + Math.floor(Math.random()*10000));
+    rows.push([
+      id, imp.accountId || "", imp.date || "", imp.title || "",
+      Number(imp.originalAmount) || 0, Number(imp.totalAmount) || 0,
+      imp.status || "pendente", imp.category || "",
+      imp.reason || "", imp.installment || "", "", imp.hash || "",
+      new Date().toISOString()
+    ]);
+    added++;
+  }
+  if (rows.length) sheet.getRange(sheet.getLastRow()+1, 1, rows.length, 13).setValues(rows);
+  return { ok: true, added };
+}
+
+function updateImport(id, updates) {
+  if (!id || !updates) return { ok: false };
+  const sheet = getImportsSheet(SpreadsheetApp.getActiveSpreadsheet());
+  const data = sheet.getDataRange().getValues();
+  for (let i = 1; i < data.length; i++) {
+    if (String(data[i][0]) === String(id)) {
+      const r = i+1;
+      if (updates.status !== undefined) sheet.getRange(r, 7).setValue(updates.status);
+      if (updates.category !== undefined) sheet.getRange(r, 8).setValue(updates.category);
+      if (updates.reason !== undefined) sheet.getRange(r, 9).setValue(updates.reason);
+      if (updates.totalAmount !== undefined) sheet.getRange(r, 6).setValue(updates.totalAmount);
+      if (updates.title !== undefined) sheet.getRange(r, 4).setValue(updates.title);
+      if (updates.expenseId !== undefined) sheet.getRange(r, 11).setValue(updates.expenseId);
+      return { ok: true };
+    }
+  }
+  return { ok: false, error: "Não encontrado" };
+}
+
+function deleteImport(id) {
+  const sheet = getImportsSheet(SpreadsheetApp.getActiveSpreadsheet());
+  const data = sheet.getDataRange().getValues();
+  for (let i = data.length - 1; i >= 1; i--) if (String(data[i][0]) === String(id)) { sheet.deleteRow(i + 1); return { ok: true }; }
+  return { ok: false };
+}
+
+function launchImports(ids, payerByAccount, accountNameById) {
+  if (!ids || !ids.length) return { ok: false, error: "Sem ids" };
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const impSheet = getImportsSheet(ss);
+  const gSheet = getGastosSheet(ss);
+  const data = impSheet.getDataRange().getValues();
+  const idSet = new Set(ids.map(String));
+  let launched = 0;
+  
+  for (let i = 1; i < data.length; i++) {
+    if (!idSet.has(String(data[i][0]))) continue;
+    if (data[i][6] === "lancada") continue;
+    
+    const accountId = String(data[i][1] || "");
+    const payer = (payerByAccount && payerByAccount[accountId]) || "";
+    const accountName = (accountNameById && accountNameById[accountId]) || "";
+    const date = data[i][2] instanceof Date ? Utilities.formatDate(data[i][2], TZ, "yyyy-MM-dd") : String(data[i][2] || "");
+    const title = String(data[i][3] || "");
+    const total = Number(data[i][5]) || 0;
+    const category = String(data[i][7] || "Outros");
+    const importId = String(data[i][0]);
+    
+    const expId = "exp_" + Date.now() + "_" + Math.floor(Math.random()*10000);
+    
+    gSheet.appendRow([
+      expId, date, title, category, total, payer, "",
+      "", new Date().toISOString(), payer, accountName, importId
+    ]);
+    
+    if (title && category) updateLearning(title, category);
+    
+    impSheet.getRange(i+1, 7).setValue("lancada");
+    impSheet.getRange(i+1, 11).setValue(expId);
+    launched++;
+  }
+  return { ok: true, launched };
+}
+
+function linkExpenseToImport(expenseId, importId, accountName) {
+  if (!expenseId || !importId) return { ok: false, error: "IDs obrigatórios" };
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const gSheet = getGastosSheet(ss);
+  const impSheet = getImportsSheet(ss);
+  
+  // Update expense: add account + importId
+  const gData = gSheet.getDataRange().getValues();
+  const headerG = gData[0];
+  const colConta = headerG.indexOf("Conta") + 1;
+  const colImpId = headerG.indexOf("ImportID") + 1;
+  
+  let foundExp = false;
+  for (let i = 1; i < gData.length; i++) {
+    if (String(gData[i][0]) === String(expenseId)) {
+      if (colConta > 0 && accountName) gSheet.getRange(i+1, colConta).setValue(accountName);
+      if (colImpId > 0) gSheet.getRange(i+1, colImpId).setValue(importId);
+      foundExp = true;
+      break;
+    }
+  }
+  
+  // Update import: status = "vinculada", expenseId
+  const iData = impSheet.getDataRange().getValues();
+  let foundImp = false;
+  for (let i = 1; i < iData.length; i++) {
+    if (String(iData[i][0]) === String(importId)) {
+      impSheet.getRange(i+1, 7).setValue("vinculada");
+      impSheet.getRange(i+1, 11).setValue(expenseId);
+      foundImp = true;
+      break;
+    }
+  }
+  
+  return { ok: foundExp && foundImp, foundExp, foundImp };
+}
+
+function unlinkExpense(expenseId) {
+  if (!expenseId) return { ok: false };
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const gSheet = getGastosSheet(ss);
+  const impSheet = getImportsSheet(ss);
+  
+  // Find expense's importId
+  const gData = gSheet.getDataRange().getValues();
+  const headerG = gData[0];
+  const colConta = headerG.indexOf("Conta") + 1;
+  const colImpId = headerG.indexOf("ImportID") + 1;
+  
+  let importId = null;
+  for (let i = 1; i < gData.length; i++) {
+    if (String(gData[i][0]) === String(expenseId)) {
+      if (colImpId > 0) {
+        importId = String(gData[i][colImpId-1] || "");
+        gSheet.getRange(i+1, colImpId).setValue("");
+      }
+      // Optional: clear account too? No — keep account info
+      break;
+    }
+  }
+  
+  // Set import status back to "pendente"
+  if (importId) {
+    const iData = impSheet.getDataRange().getValues();
+    for (let i = 1; i < iData.length; i++) {
+      if (String(iData[i][0]) === String(importId)) {
+        impSheet.getRange(i+1, 7).setValue("pendente");
+        impSheet.getRange(i+1, 11).setValue("");
+        break;
+      }
+    }
+  }
+  
+  return { ok: true, importId };
+}
+
+// ─── UPLOAD FOLDER ─────────────────────────────────────────
+function listUploads() {
+  const folder = getUploadFolder();
+  const files = folder.getFiles();
+  const list = [];
+  while (files.hasNext()) {
+    const f = files.next();
+    const mime = f.getMimeType();
+    const isImage = mime && mime.indexOf("image/") === 0;
+    const isPdf = mime === "application/pdf";
+    if (isImage || isPdf) list.push({ id: f.getId(), name: f.getName(), modified: f.getLastUpdated().toISOString(), mimeType: mime, isPdf });
+  }
+  list.sort((a,b) => a.modified.localeCompare(b.modified));
+  return { ok: true, files: list, folderUrl: folder.getUrl() };
+}
+
+function getUploadFile(id) {
+  if (!id) return { ok: false, error: "ID obrigatório" };
+  const file = DriveApp.getFileById(id);
+  const blob = file.getBlob();
+  return { ok: true, base64: Utilities.base64Encode(blob.getBytes()), mimeType: blob.getContentType(), name: file.getName() };
+}
+
+function deleteUpload(id) {
+  if (!id) return { ok: false };
+  try { DriveApp.getFileById(id).setTrashed(true); return { ok: true }; }
+  catch (err) { return { ok: false, error: err.message }; }
+}
+
+function getUploadFolder() {
+  const root = getDriveFolder(null, FOLDER_NAME);
+  return getDriveFolder(root, UPLOAD_FOLDER_NAME);
+}
+
+// ─── DRIVE: salvar comprovante ──────────────────────────────
+function saveReceiptFile(b64, exp) {
+  try {
+    const date = (exp.date && exp.date.length >= 10) ? exp.date : Utilities.formatDate(new Date(), TZ, "yyyy-MM-dd");
+    const year = date.slice(0, 4);
+    const monthIndex = parseInt(date.slice(5, 7)) - 1;
+    const monthName = MESES[monthIndex] || "Outros";
+    const rootFolder = getDriveFolder(null, FOLDER_NAME);
+    const yearFolder = getDriveFolder(rootFolder, year);
+    const monthFolder = getDriveFolder(yearFolder, monthName);
+    const merchant = sanitizeName(exp.merchant || "sem-nome");
+    const total = Number(exp.total || 0).toFixed(2).replace(".", ",");
+    const isPdf = exp.mimeType === "application/pdf";
+    const ext = isPdf ? "pdf" : "jpg";
+    const mime = isPdf ? "application/pdf" : "image/jpeg";
+    const filename = date + "_" + merchant + "_R$" + total + "." + ext;
+    const blob = Utilities.newBlob(Utilities.base64Decode(b64), mime, filename);
+    const file = monthFolder.createFile(blob);
+    file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+    return file.getUrl();
+  } catch (err) { Logger.log("Erro saveReceiptFile: " + err.message); return ""; }
+}
+
+function getDriveFolder(parent, name) {
+  const folders = parent ? parent.getFoldersByName(name) : DriveApp.getFoldersByName(name);
+  if (folders.hasNext()) return folders.next();
+  return parent ? parent.createFolder(name) : DriveApp.createFolder(name);
+}
+
+function sanitizeName(name) {
+  return name.replace(/[\/\\:*?"<>|]/g, "").trim().replace(/\s+/g, "-").slice(0, 40);
+}
+
+// ─── HELPERS DE PLANILHA ───────────────────────────────────
+function getGastosSheet(ss) {
+  let sheet = ss.getSheetByName(SHEET_GASTOS);
+  if (!sheet) {
+    sheet = ss.insertSheet(SHEET_GASTOS);
+    const headers = ["ID","Data","Estabelecimento","Categoria","Valor (R$)","Responsável","Itens","Comprovante (Drive)","Registrado em","Dividido com","Conta","ImportID"];
+    sheet.appendRow(headers);
+    formatHeader(sheet, headers.length);
+    [120,100,200,130,100,120,250,220,170,220,180,140].forEach((w,i)=>sheet.setColumnWidth(i+1,w));
+  } else {
+    const lastCol = sheet.getLastColumn();
+    const headerRow = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
+    if (headerRow.indexOf("Dividido com") === -1) {
+      const newCol = lastCol + 1;
+      sheet.getRange(1, newCol).setValue("Dividido com");
+      sheet.getRange(1, newCol).setBackground("#1a3a2a").setFontColor("#fff").setFontWeight("bold");
+      sheet.setColumnWidth(newCol, 220);
+    }
+    // Migration: add Conta and ImportID columns if missing
+    const newHeaderRow = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+    if (newHeaderRow.indexOf("Conta") === -1) {
+      const newCol = sheet.getLastColumn() + 1;
+      sheet.getRange(1, newCol).setValue("Conta");
+      sheet.getRange(1, newCol).setBackground("#1a3a2a").setFontColor("#fff").setFontWeight("bold");
+      sheet.setColumnWidth(newCol, 180);
+    }
+    const newHeaderRow2 = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+    if (newHeaderRow2.indexOf("ImportID") === -1) {
+      const newCol = sheet.getLastColumn() + 1;
+      sheet.getRange(1, newCol).setValue("ImportID");
+      sheet.getRange(1, newCol).setBackground("#1a3a2a").setFontColor("#fff").setFontWeight("bold");
+      sheet.setColumnWidth(newCol, 140);
+    }
+  }
+  return sheet;
+}
+
+function getAprendizadoSheet(ss) {
+  let sheet = ss.getSheetByName(SHEET_APRENDIZADO);
+  if (!sheet) {
+    sheet = ss.insertSheet(SHEET_APRENDIZADO);
+    sheet.appendRow(["Estabelecimento","Categoria","Atualizado em"]);
+    formatHeader(sheet, 3);
+    [220,150,170].forEach((w,i)=>sheet.setColumnWidth(i+1,w));
+  }
+  return sheet;
+}
+
+function getConfigSheet(ss) {
+  let sheet = ss.getSheetByName(SHEET_CONFIG);
+  if (!sheet) {
+    sheet = ss.insertSheet(SHEET_CONFIG);
+    sheet.appendRow(["Responsável","Adicionado em"]);
+    formatHeader(sheet, 2);
+    [200,170].forEach((w,i)=>sheet.setColumnWidth(i+1,w));
+  }
+  return sheet;
+}
+
+function getCategoriesSheet(ss) {
+  let sheet = ss.getSheetByName(SHEET_CATEGORIAS);
+  if (!sheet) {
+    sheet = ss.insertSheet(SHEET_CATEGORIAS);
+    sheet.appendRow(["Nome","Ícone","Cor","Adicionado em"]);
+    formatHeader(sheet, 4);
+    [180,80,100,170].forEach((w,i)=>sheet.setColumnWidth(i+1,w));
+    DEFAULT_CATEGORIES.forEach(c=>sheet.appendRow([c[0],c[1],c[2],new Date().toISOString()]));
+  }
+  return sheet;
+}
+
+function getContasSheet(ss) {
+  let sheet = ss.getSheetByName(SHEET_CONTAS);
+  if (!sheet) {
+    sheet = ss.insertSheet(SHEET_CONTAS);
+    const headers = ["ID","Nome","Tipo","Pessoa","Banco","Cor","CriadoEm"];
+    sheet.appendRow(headers);
+    formatHeader(sheet, headers.length);
+    [140,200,80,120,100,80,170].forEach((w,i)=>sheet.setColumnWidth(i+1,w));
+  }
+  return sheet;
+}
+
+function getImportsSheet(ss) {
+  let sheet = ss.getSheetByName(SHEET_IMPORTS);
+  if (!sheet) {
+    sheet = ss.insertSheet(SHEET_IMPORTS);
+    const headers = ["ID","ContaID","Data","Título","ValorOriginal","ValorTotal","Status","Categoria","Motivo","Parcela","ExpenseID","Hash","CriadoEm"];
+    sheet.appendRow(headers);
+    formatHeader(sheet, headers.length);
+    [140,140,90,250,100,100,100,120,150,80,140,200,170].forEach((w,i)=>sheet.setColumnWidth(i+1,w));
+  }
+  return sheet;
+}
+
+function formatHeader(sheet, cols) {
+  const range = sheet.getRange(1, 1, 1, cols);
+  range.setBackground("#1a3a2a");
+  range.setFontColor("#ffffff");
+  range.setFontWeight("bold");
+  sheet.setFrozenRows(1);
+}
+
+function teste() { Logger.log(JSON.stringify(getAll(), null, 2)); }
 </html>
