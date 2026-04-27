@@ -2153,41 +2153,55 @@ function BulkUploadProcessor({uploads,expensesAll,payers,lmap,cats,apiKey,script
   const [stats,setStats]=useState({success:0,linked:0,failed:0,skipped:0});
   const [log,setLog]=useState([]);
   const cancelRef=useRef(false);
-  const uploadsRef=useRef(uploads);
-  const payerRef=useRef(defaultPayer);
-  
-  // Mantém refs sempre atualizados
-  useEffect(()=>{uploadsRef.current=uploads;},[uploads]);
-  useEffect(()=>{payerRef.current=defaultPayer;},[defaultPayer]);
+  const runningRef=useRef(false); // garante que processAll só roda uma vez
+  // Snapshot dos uploads e expenses ao iniciar — não muda durante processamento
+  const snapshotRef=useRef({uploads:[],expensesAll:[],payer:""});
   
   const addLog=(msg,type="ok")=>{
     setLog(p=>[{msg,type,at:Date.now()},...p].slice(0,8));
   };
   
-  // Cleanup só quando desmonta
-  useEffect(()=>{return()=>{cancelRef.current=true;};},[]);
+  // Cleanup só quando desmonta de verdade
+  useEffect(()=>{return()=>{cancelRef.current=true;runningRef.current=false;};},[]);
   
-  const startProcessing=()=>{
+  const startProcessing=async()=>{
     if(!defaultPayer){toast_("Escolha o pagador padrão","err");return;}
+    if(runningRef.current){toast_("Já está rodando","err");return;}
+    
+    // Faz snapshot dos uploads/expenses ANTES de começar
+    snapshotRef.current={
+      uploads:[...(uploads||[])],
+      expensesAll:[...(expensesAll||[])],
+      payer:defaultPayer
+    };
+    
     cancelRef.current=false;
+    runningRef.current=true;
     setStage("processing");
-    // Passa uploads e payer diretamente para evitar problemas de closure/estado
-    const currentUploads=uploadsRef.current;
-    const currentPayer=payerRef.current;
-    setTimeout(()=>processAll(currentUploads,currentPayer),100);
+    
+    // Roda direto, sem setTimeout — usa snapshot
+    try{
+      await processAll();
+    }catch(err){
+      addLog(`💥 Erro fatal no processamento: ${err.message}`,"err");
+    }finally{
+      runningRef.current=false;
+      setStage("done");
+    }
   };
   
-  const processAll=async(uploadsList,payerDefault)=>{
-    // Usa os parâmetros passados diretamente (não depende de closure)
-    const filesToProcess=uploadsList||uploads||[];
-    const payerFallback=payerDefault||defaultPayer||payers[0]||"";
+  const processAll=async()=>{
+    const filesToProcess=snapshotRef.current.uploads;
+    const payerFallback=snapshotRef.current.payer;
+    const expensesSnapshot=snapshotRef.current.expensesAll;
+    
     addLog(`🚀 Iniciando: ${filesToProcess.length} arquivo(s)`);
     let successCount=0,linkedCount=0,failedCount=0,skippedCount=0;
     let consecutiveFailures=0;
     
     // Mecanismo 1: deduplicação por DriveFileID
     const usedFileIds=new Set();
-    (expensesAll||[]).forEach(e=>{if(e.driveFileId)usedFileIds.add(e.driveFileId);});
+    expensesSnapshot.forEach(e=>{if(e.driveFileId)usedFileIds.add(e.driveFileId);});
     
     for(let i=0;i<filesToProcess.length;i++){
       if(cancelRef.current)break;
@@ -2314,7 +2328,7 @@ function BulkUploadProcessor({uploads,expensesAll,payers,lmap,cats,apiKey,script
       }
     }
     
-    setStage("done");
+    // setStage("done") agora é feito no finally do startProcessing
   };
   
   const handleCancel=()=>{
@@ -3124,11 +3138,14 @@ function App(){
   };
 
   if(!cfg.scriptUrl)return React.createElement(React.Fragment,null,toast&&React.createElement(Toast,{t:toast}),React.createElement(SetupView,{toast_,onSave:url=>setCfg({scriptUrl:url})}));
-  const RouteWrap=({children})=>React.createElement(React.Fragment,null,toast&&React.createElement(Toast,{t:toast}),children);
+  const RouteWrap=({children})=>React.createElement(React.Fragment,null,
+    React.createElement("div",{key:"toast-slot"},toast&&React.createElement(Toast,{t:toast})),
+    React.createElement("div",{key:"main-content"},children)
+  );
 
   if(view==="localfiles")return React.createElement(RouteWrap,null,React.createElement(LocalFileProcessor,{files:localFiles,payers,lmap,cats,apiKey,imports,accounts,matchPenalties,onSave:saveExpense,onSaveLinked:saveLinkedExpense,onFinish:()=>{setView("home");toast_("✅ Concluído!");},toast_}));
   if(view==="capture")return React.createElement(RouteWrap,null,React.createElement(CaptureView,{payers,lmap,cats,apiKey,imports,accounts,matchPenalties,onSave:saveAndReturnHome,onSaveLinked:saveLinkedAndReturnHome,onBack:()=>setView("home"),toast_}));
-  if(view==="upload")return React.createElement(RouteWrap,null,React.createElement(BulkUploadProcessor,{uploads:pendingUploads,expensesAll:expenses,payers,lmap,cats,apiKey,scriptUrl:cfg.scriptUrl,imports,accounts,matchPenalties,onSaveBulk:saveBulkExpense,onDeleteUpload:deleteUploadFile,onMoveToErrors:moveToErrorsFn,onFinish:()=>{checkUploads();syncDown();setView("history");},toast_}));
+  if(view==="upload")return React.createElement(RouteWrap,null,React.createElement(BulkUploadProcessor,{key:"bulk-uploader",uploads:pendingUploads,expensesAll:expenses,payers,lmap,cats,apiKey,scriptUrl:cfg.scriptUrl,imports,accounts,matchPenalties,onSaveBulk:saveBulkExpense,onDeleteUpload:deleteUploadFile,onMoveToErrors:moveToErrorsFn,onFinish:()=>{checkUploads();syncDown();setView("history");},toast_}));
   if(view==="history")return React.createElement(RouteWrap,null,React.createElement(HistoryView,{expenses,cats,accounts,onBack:()=>setView("home"),onDelete:deleteExpense,onUnlink:unlinkExpenseFn,onEdit:e=>{setEditingExpense(e);setView("editExpense");}}));
   if(view==="editExpense"&&editingExpense)return React.createElement(RouteWrap,null,React.createElement(EditExpenseView,{expense:editingExpense,imports,accounts,payers,cats,matchPenalties,onSave:updateExpenseFn,onUnlink:unlinkExpenseFn,onLink:linkExpenseFn,onBack:()=>{setEditingExpense(null);setView("history");},toast_}));
   if(view==="dashboard")return React.createElement(RouteWrap,null,React.createElement(DashboardView,{expenses,cats,payers,accounts,onBack:()=>setView("home")}));
