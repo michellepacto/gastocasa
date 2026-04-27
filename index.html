@@ -887,6 +887,7 @@ function ImportView({accounts,imports,expenses,cats,payers,lmap,scriptUrl,onAddA
   const [filterStatus,setFilterStatus]=useState("pendente");
   const [selectedIds,setSelectedIds]=useState(new Set());
   const [busy,setBusy]=useState(false);
+  const [searchText,setSearchText]=useState("");
 
   // Detecta duplicatas dinamicamente
   const importsWithDup=useMemo(()=>{
@@ -898,12 +899,19 @@ function ImportView({accounts,imports,expenses,cats,payers,lmap,scriptUrl,onAddA
     });
   },[imports,expenses]);
 
+  // Normalização para busca
+  const normSearch=s=>(s||"").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"");
+
   // Aplica filtros
   const filtered=importsWithDup.filter(imp=>{
     if(selectedAccount!=="all"&&imp.accountId!==selectedAccount)return false;
     if(filterStatus==="all")return true;
     if(filterStatus==="duplicada")return !!imp._duplicate;
-    return imp.status===filterStatus;
+    if(!imp.status||imp.status!==filterStatus)return false;
+    return true;
+  }).filter(imp=>{
+    if(!searchText.trim())return true;
+    return normSearch(imp.title).includes(normSearch(searchText.trim()));
   }).sort((a,b)=>(b.date||"").localeCompare(a.date||""));
 
   // Estatísticas
@@ -1000,6 +1008,18 @@ function ImportView({accounts,imports,expenses,cats,payers,lmap,scriptUrl,onAddA
               React.createElement(Pill,{key:k,active:filterStatus===k,onClick:()=>setFilterStatus(k),color:k==="pendente"?"#2563eb":k==="lancada"?"#16a34a":k==="ignorada"?"#6b7280":k==="duplicada"?"#f59e0b":"#1a3a2a"},`${l} (${n})`)
             )
           )
+        ),
+        // Busca por estabelecimento
+        React.createElement("div",{style:{position:"relative",marginTop:10}},
+          React.createElement("span",{style:{position:"absolute",left:12,top:"50%",transform:"translateY(-50%)",fontSize:14,color:"#9ca3af",pointerEvents:"none"}},"🔍"),
+          React.createElement("input",{
+            type:"text",
+            placeholder:"Buscar estabelecimento...",
+            value:searchText,
+            onChange:e=>setSearchText(e.target.value),
+            style:{width:"100%",padding:"9px 12px 9px 34px",borderRadius:12,border:"1.5px solid #e5e7eb",fontSize:13,outline:"none",boxSizing:"border-box",background:searchText?"#fff":"#f9fafb"}
+          }),
+          searchText&&React.createElement("button",{onClick:()=>setSearchText(""),style:{position:"absolute",right:10,top:"50%",transform:"translateY(-50%)",background:"none",border:"none",color:"#9ca3af",fontSize:16,cursor:"pointer",padding:0}},"✕")
         )
       ),
       
@@ -2446,12 +2466,15 @@ function BulkUploadProcessor({uploads,expensesAll,payers,lmap,cats,apiKey,script
 function HistoryView({expenses,cats,accounts,onBack,onDelete,onUnlink,onEdit}){
   const [filterCat,setFilterCat]=useState("Todas");const [filterMonth,setFilterMonth]=useState("all");
   const [showOnlyUnreviewed,setShowOnlyUnreviewed]=useState(false);
+  const [searchText,setSearchText]=useState("");
   const months=[...new Set(expenses.map(e=>e.date?.slice(0,7)))].sort().reverse();
   const unreviewedCount=expenses.filter(e=>e.reviewed===false).length;
+  const normSearch=s=>(s||"").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"");
   const filtered=expenses.filter(e=>{
     if(filterCat!=="Todas"&&e.category!==filterCat)return false;
     if(filterMonth!=="all"&&e.date?.slice(0,7)!==filterMonth)return false;
     if(showOnlyUnreviewed&&e.reviewed!==false)return false;
+    if(searchText.trim()&&!normSearch(e.merchant).includes(normSearch(searchText.trim())))return false;
     return true;
   });
   const total=filtered.reduce((s,e)=>s+(+e.total||0),0);
@@ -2463,6 +2486,18 @@ function HistoryView({expenses,cats,accounts,onBack,onDelete,onUnlink,onEdit}){
     ),
     React.createElement("div",{style:{padding:"14px 16px 0"}},
       React.createElement("div",{style:{overflowX:"auto",display:"flex",gap:8,paddingBottom:8}},["all",...months].map(m=>React.createElement("button",{key:m,onClick:()=>setFilterMonth(m),style:{padding:"6px 14px",borderRadius:20,border:"none",whiteSpace:"nowrap",background:filterMonth===m?"#1a3a2a":"#fff",color:filterMonth===m?"#fff":"#374151",fontWeight:600,fontSize:12}},m==="all"?"Todos":new Date(m+"-15").toLocaleDateString("pt-BR",{month:"short",year:"2-digit"})))),
+      // Campo de busca por estabelecimento
+      React.createElement("div",{style:{position:"relative",marginBottom:10}},
+        React.createElement("span",{style:{position:"absolute",left:12,top:"50%",transform:"translateY(-50%)",fontSize:14,color:"#9ca3af",pointerEvents:"none"}},"🔍"),
+        React.createElement("input",{
+          type:"text",
+          placeholder:"Buscar estabelecimento...",
+          value:searchText,
+          onChange:e=>setSearchText(e.target.value),
+          style:{width:"100%",padding:"9px 12px 9px 34px",borderRadius:12,border:"1.5px solid #e5e7eb",fontSize:13,outline:"none",boxSizing:"border-box",background:searchText?"#fff":"#f9fafb"}
+        }),
+        searchText&&React.createElement("button",{onClick:()=>setSearchText(""),style:{position:"absolute",right:10,top:"50%",transform:"translateY(-50%)",background:"none",border:"none",color:"#9ca3af",fontSize:16,cursor:"pointer",padding:0}},"✕")
+      ),
       unreviewedCount>0&&React.createElement("button",{onClick:()=>setShowOnlyUnreviewed(!showOnlyUnreviewed),style:{width:"100%",padding:"10px 14px",borderRadius:12,border:"none",background:showOnlyUnreviewed?"#f59e0b":"#fef3c7",color:showOnlyUnreviewed?"#fff":"#92400e",fontWeight:700,fontSize:13,marginBottom:10,display:"flex",alignItems:"center",justifyContent:"space-between"}},
         React.createElement("span",null,showOnlyUnreviewed?"✓ Mostrando só não revisados":`👁️ Tem ${unreviewedCount} não revisado${unreviewedCount!==1?"s":""}`),
         React.createElement("span",{style:{fontSize:11,opacity:.85}},showOnlyUnreviewed?"toque para mostrar todos":"toque para filtrar")
@@ -3225,10 +3260,46 @@ function App(){
     const payerByAccount={};
     const accountNameById={};
     accounts.forEach(a=>{payerByAccount[a.id]=a.payer;accountNameById[a.id]=a.name;});
-    try{const r=await api(cfg.scriptUrl,"launchImports",{ids,payerByAccount,accountNameById});
-      if(r.ok){toast_(`✅ ${r.launched} despesa(s) lançada(s)!`);await syncDown();return r;}
-      throw new Error(r.error);
-    }catch(err){toast_("⚠️ "+err.message,"err");return null;}
+    
+    // Atualização otimista: cria despesas localmente na hora
+    const now=new Date().toISOString();
+    const newExpenses=[];
+    const idsSet=new Set(ids);
+    imports.filter(i=>idsSet.has(i.id)&&i.status==="pendente").forEach((imp,idx)=>{
+      const payer=payerByAccount[imp.accountId]||payers[0]||"";
+      const accountName=accountNameById[imp.accountId]||"";
+      const expId="exp_opt_"+Date.now()+"_"+idx;
+      newExpenses.push({
+        id:expId,date:imp.date,merchant:imp.title,
+        category:imp.category||"Outros",total:imp.totalAmount,
+        payer,splitWith:[payer],account:accountName,
+        importId:imp.id,reviewed:true,at:now,items:[]
+      });
+    });
+    
+    // Atualiza UI imediatamente (sem esperar servidor)
+    if(newExpenses.length>0){
+      setExpenses(p=>[...newExpenses,...p]);
+      setImports(p=>p.map(i=>idsSet.has(i.id)?{...i,status:"lancada"}:i));
+      toast_(`✅ ${newExpenses.length} despesa(s) lançada(s)!`);
+    }
+    
+    // Manda pro servidor em background (sem await)
+    api(cfg.scriptUrl,"launchImports",{ids,payerByAccount,accountNameById})
+      .then(r=>{
+        if(r?.ok){
+          // Sync silencioso pra atualizar IDs reais
+          syncDown();
+        }else{
+          toast_("⚠️ Erro ao salvar no servidor — sincronizando...","err");
+          syncDown();
+        }
+      })
+      .catch(()=>{
+        toast_("⚠️ Falha de conexão — tente sincronizar","err");
+      });
+    
+    return {ok:true,launched:newExpenses.length};
   };
   
   const deleteSessionFn=async(sessionId,alsoDeleteExpenses)=>{
