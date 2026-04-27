@@ -442,7 +442,7 @@ const ACCOUNT_COLORS=["#7c3aed","#16a34a","#2563eb","#dc2626","#ea580c","#0891b2
 
 const ld=(k,d)=>{try{return JSON.parse(localStorage.getItem(k))??d;}catch{return d;}};
 const sv=(k,v)=>{try{localStorage.setItem(k,JSON.stringify(v));}catch{}};
-const brl=n=>`R$ ${(+(n)||0).toFixed(2).replace(".",",")}`;
+const brl=n=>{const v=(+(n)||0).toFixed(2).replace(".",",");const[i,d]=v.split(",");return"R$ "+i.replace(/\B(?=(\d{3})+(?!\d))/g,".")+","+d;};
 const brlShort=n=>{const v=+(n)||0;if(Math.abs(v)>=1000)return"R$ "+(v/1000).toFixed(1).replace(".",",")+"k";return brl(v);};
 const dtBR=d=>d?new Date(d+"T12:00").toLocaleDateString("pt-BR"):"";
 const today=()=>new Date().toISOString().split("T")[0];
@@ -1339,10 +1339,10 @@ function ImportView({accounts,imports,expenses,cats,payers,lmap,scriptUrl,onAddA
   };
 
   // ─── AÇÕES ───────────────────────────────────────────
-  const launchOne=(imp)=>{
+  const launchOne=async(imp)=>{
     if(!imp.category){toast_("Defina uma categoria primeiro","err");return;}
     if(imp._duplicate){if(!confirm("Esta transação parece duplicar um gasto existente. Lançar mesmo assim?"))return;}
-    onLaunchImports([imp.id]);
+    await onLaunchImports([imp.id]);
     setSelectedIds(new Set([...selectedIds].filter(id=>id!==imp.id)));
   };
   const launchSelected=()=>{
@@ -3727,7 +3727,7 @@ function App(){
     try{await sbDeleteImport(id);}catch{}
   };
 
-  const launchImports=(ids)=>{
+  const launchImports=async(ids)=>{
     const payerByAccount={};
     const accountNameById={};
     accounts.forEach(a=>{payerByAccount[a.id]=a.payer;accountNameById[a.id]=a.name;});
@@ -3749,18 +3749,24 @@ function App(){
 
     if(newExpenses.length===0)return;
 
+    // Atualiza UI imediatamente (otimista)
+    const newExpIds=new Set(newExpenses.map(e=>e.id));
     ids.forEach(id=>inFlightImportsRef.current.add(id));
     setExpenses(p=>[...newExpenses,...p]);
     setImports(p=>p.map(i=>idsSet.has(i.id)?{...i,status:"lancada"}:i));
-    toast_(`✅ ${newExpenses.length} lançada(s)`);
 
-    // Salva no Supabase em background
-    sbLaunchImports(ids,newExpenses)
-      .then(()=>{setTimeout(()=>{ids.forEach(id=>inFlightImportsRef.current.delete(id));},8000);})
-      .catch(err=>{
-        ids.forEach(id=>inFlightImportsRef.current.delete(id));
-        toast_("⚠️ Erro ao salvar: "+err.message,"err");
-      });
+    // Aguarda confirmação do Supabase
+    try{
+      await sbLaunchImports(ids,newExpenses);
+      toast_(`✅ ${newExpenses.length} lançada(s)`);
+    }catch(err){
+      // Revert: volta para pendente e remove despesas otimistas
+      setImports(p=>p.map(i=>idsSet.has(i.id)?{...i,status:"pendente"}:i));
+      setExpenses(p=>p.filter(e=>!newExpIds.has(e.id)));
+      toast_("⚠️ Erro ao lançar: "+err.message,"err");
+    }finally{
+      ids.forEach(id=>inFlightImportsRef.current.delete(id));
+    }
   };
 
   const deleteSessionFn=async(sessionId,alsoDeleteExpenses)=>{
