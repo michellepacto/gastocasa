@@ -938,35 +938,29 @@ function ImportView({accounts,imports,expenses,cats,payers,lmap,scriptUrl,onAddA
   };
 
   // ─── AÇÕES ───────────────────────────────────────────
-  const launchOne=async(imp)=>{
+  const launchOne=(imp)=>{
     if(!imp.category){toast_("Defina uma categoria primeiro","err");return;}
     if(imp._duplicate){if(!confirm("Esta transação parece duplicar um gasto existente. Lançar mesmo assim?"))return;}
-    setBusy(true);
-    await onLaunchImports([imp.id]);
-    setBusy(false);
+    onLaunchImports([imp.id]);
     setSelectedIds(new Set([...selectedIds].filter(id=>id!==imp.id)));
   };
-  const launchSelected=async()=>{
+  const launchSelected=()=>{
     const ids=[...selectedIds];
     if(ids.length===0){toast_("Selecione pelo menos uma","err");return;}
     const items=ids.map(id=>importsWithDup.find(i=>i.id===id)).filter(Boolean);
     const semCat=items.filter(i=>!i.category);
     if(semCat.length>0){toast_(`${semCat.length} sem categoria — preencha primeiro`,"err");return;}
     if(!confirm(`Lançar ${ids.length} despesa(s)?`))return;
-    setBusy(true);
-    await onLaunchImports(ids);
-    setBusy(false);
+    onLaunchImports(ids);
     setSelectedIds(new Set());
   };
-  const launchAllPending=async()=>{
+  const launchAllPending=()=>{
     const ids=filtered.filter(i=>i.status==="pendente"&&!i._duplicate).map(i=>i.id);
     if(ids.length===0){toast_("Nenhuma pendente sem duplicata","err");return;}
     const semCat=ids.filter(id=>{const i=importsWithDup.find(x=>x.id===id);return !i.category;});
     if(semCat.length>0){toast_(`${semCat.length} sem categoria — preencha primeiro`,"err");return;}
     if(!confirm(`Lançar TODAS as ${ids.length} pendentes (excluindo duplicatas)?`))return;
-    setBusy(true);
-    await onLaunchImports(ids);
-    setBusy(false);
+    onLaunchImports(ids);
   };
 
   const setStatus=async(id,status)=>{
@@ -3256,7 +3250,7 @@ function App(){
     setImports(p=>p.filter(i=>i.id!==id));
     try{await api(cfg.scriptUrl,"deleteImport",{id});}catch{}
   };
-  const launchImports=async(ids)=>{
+  const launchImports=(ids)=>{
     const payerByAccount={};
     const accountNameById={};
     accounts.forEach(a=>{payerByAccount[a.id]=a.payer;accountNameById[a.id]=a.name;});
@@ -3268,7 +3262,7 @@ function App(){
     imports.filter(i=>idsSet.has(i.id)&&i.status==="pendente").forEach((imp,idx)=>{
       const payer=payerByAccount[imp.accountId]||payers[0]||"";
       const accountName=accountNameById[imp.accountId]||"";
-      const expId="exp_opt_"+Date.now()+"_"+idx;
+      const expId="exp_"+Date.now()+"_"+idx+"_"+Math.floor(Math.random()*10000);
       newExpenses.push({
         id:expId,date:imp.date,merchant:imp.title,
         category:imp.category||"Outros",total:imp.totalAmount,
@@ -3277,29 +3271,16 @@ function App(){
       });
     });
     
-    // Atualiza UI imediatamente (sem esperar servidor)
-    if(newExpenses.length>0){
-      setExpenses(p=>[...newExpenses,...p]);
-      setImports(p=>p.map(i=>idsSet.has(i.id)?{...i,status:"lancada"}:i));
-      toast_(`✅ ${newExpenses.length} despesa(s) lançada(s)!`);
-    }
+    if(newExpenses.length===0)return;
     
-    // Manda pro servidor em background (sem await)
+    // UI atualiza imediatamente (sem espera)
+    setExpenses(p=>[...newExpenses,...p]);
+    setImports(p=>p.map(i=>idsSet.has(i.id)?{...i,status:"lancada"}:i));
+    toast_(`✅ ${newExpenses.length} lançada(s)`);
+    
+    // API em background, sem syncDown depois (otimista é confiável)
     api(cfg.scriptUrl,"launchImports",{ids,payerByAccount,accountNameById})
-      .then(r=>{
-        if(r?.ok){
-          // Sync silencioso pra atualizar IDs reais
-          syncDown();
-        }else{
-          toast_("⚠️ Erro ao salvar no servidor — sincronizando...","err");
-          syncDown();
-        }
-      })
-      .catch(()=>{
-        toast_("⚠️ Falha de conexão — tente sincronizar","err");
-      });
-    
-    return {ok:true,launched:newExpenses.length};
+      .catch(err=>toast_("⚠️ Erro ao salvar: "+err.message+" (use 🔄 para sincronizar)","err"));
   };
   
   const deleteSessionFn=async(sessionId,alsoDeleteExpenses)=>{
