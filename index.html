@@ -27,6 +27,406 @@ table { border-spacing: 0; }
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.0/dist/umd/supabase.min.js"></script>
 <script>
+// ═══════════════════════════════════════════════════════════════════
+// GASTOCASA — CAMADA DE DADOS SUPABASE
+// Substitui Apps Script para todas as operações de dados.
+// Drive (fotos/PDFs) ainda usa Apps Script.
+// ═══════════════════════════════════════════════════════════════════
+
+const SUPABASE_URL = "https://obvehcuxdludclwgkwzp.supabase.co";
+const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9idmVoY3V4ZGx1ZGNsd2drd3pwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzczMDYxNTIsImV4cCI6MjA5Mjg4MjE1Mn0.g2lShJdXw-FXERCPCYfcub8--lMv_kkqueZu4ulbR8E";
+
+let _sb = null;
+function sb() {
+  if (_sb) return _sb;
+  if (!window.supabase) throw new Error("Cliente Supabase não carregado");
+  _sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+  return _sb;
+}
+
+// ── MAPPERS ──────────────────────────────────────────────────────────
+
+function dbToExp(r) {
+  return {
+    id: r.id,
+    date: r.date,
+    merchant: r.merchant || "",
+    category: r.category || "",
+    total: Number(r.total) || 0,
+    payer: r.payer || "",
+    items: r.items || [],
+    receiptUrl: r.receipt_url || "",
+    splitWith: r.split_with || [],
+    account: r.account || "",
+    importId: r.import_id || "",
+    reviewed: r.reviewed !== false,
+    driveFileId: r.drive_file_id || "",
+    at: r.at || r.created_at || ""
+  };
+}
+
+function expToDb(e) {
+  return {
+    id: e.id,
+    date: e.date,
+    merchant: e.merchant || "",
+    category: e.category || null,
+    total: Number(e.total) || 0,
+    payer: e.payer || null,
+    items: Array.isArray(e.items) ? e.items : [],
+    receipt_url: e.receiptUrl || null,
+    split_with: Array.isArray(e.splitWith) ? e.splitWith : (e.payer ? [e.payer] : []),
+    account: e.account || null,
+    import_id: e.importId || null,
+    reviewed: e.reviewed !== false,
+    drive_file_id: e.driveFileId || null,
+    at: e.at || new Date().toISOString()
+  };
+}
+
+function dbToImp(r) {
+  return {
+    id: r.id,
+    accountId: r.account_id || "",
+    date: r.date || "",
+    title: r.title || "",
+    originalAmount: r.original_amount != null ? Number(r.original_amount) : null,
+    totalAmount: Number(r.total_amount) || 0,
+    status: r.status || "pendente",
+    category: r.category || "",
+    reason: r.reason || "",
+    installment: r.installment || null,
+    hash: r.hash || "",
+    sessionId: r.session_id || "",
+    expenseId: r.expense_id || ""
+  };
+}
+
+// ── SYNC COMPLETO ────────────────────────────────────────────────────
+
+async function sbGetAll() {
+  const supa = sb();
+  const [expRes, impRes, payRes, catRes, accRes, lrnRes, penRes] = await Promise.all([
+    supa.from("expenses").select("*").order("date", {ascending: false}),
+    supa.from("imports").select("*").order("date", {ascending: false}),
+    supa.from("payers").select("name").order("name"),
+    supa.from("categories").select("*").order("name"),
+    supa.from("accounts").select("*").order("name"),
+    supa.from("learning").select("*"),
+    supa.from("match_penalties").select("*")
+  ]);
+
+  const errs = [expRes, impRes, payRes, catRes, accRes, lrnRes, penRes]
+    .filter(r => r.error).map(r => r.error.message);
+  if (errs.length) throw new Error("Supabase getAll: " + errs.join("; "));
+
+  // learning: rows → {merchant: category}
+  const lmap = {};
+  (lrnRes.data || []).forEach(r => { lmap[r.merchant] = r.category; });
+
+  // match penalties: rows → {key: penalty}
+  const matchPenalties = {};
+  (penRes.data || []).forEach(r => { matchPenalties[r.key] = r.penalty; });
+
+  // categories: rows → app format [{n, i, c}]
+  const categories = (catRes.data || []).map(r => ({ n: r.name, i: r.emoji || "", c: "" }));
+
+  return {
+    ok: true,
+    expenses: (expRes.data || []).map(dbToExp),
+    imports: (impRes.data || []).map(dbToImp),
+    payers: (payRes.data || []).map(r => r.name),
+    categories,
+    accounts: accRes.data || [],
+    learning: lmap,
+    matchPenalties
+  };
+}
+
+// ── DESPESAS ─────────────────────────────────────────────────────────
+
+async function sbSaveExpense(expense) {
+  const { error } = await sb().from("expenses").upsert(expToDb(expense), { onConflict: "id" });
+  if (error) throw new Error(error.message);
+  // Atualiza aprendizado
+  if (expense.merchant && expense.category) {
+    sbUpdateLearning(expense.merchant, expense.category);
+  }
+  return { ok: true };
+}
+
+async function sbUpdateExpense(id, updates) {
+  const map = {
+    merchant: "merchant", category: "category", total: "total", payer: "payer",
+    date: "date", splitWith: "split_with", items: "items", reviewed: "reviewed",
+    account: "account", importId: "import_id", driveFileId: "drive_file_id",
+    receiptUrl: "receipt_url"
+  };
+  const dbUp = {};
+  Object.entries(updates).forEach(([k, v]) => { if (map[k]) dbUp[map[k]] = v; });
+  const { error } = await sb().from("expenses").update(dbUp).eq("id", id);
+  if (error) throw new Error(error.message);
+  return { ok: true };
+}
+
+async function sbDeleteExpense(id) {
+  const { error } = await sb().from("expenses").delete().eq("id", id);
+  if (error) throw new Error(error.message);
+  return { ok: true };
+}
+
+async function sbBulkDeleteExpenses(ids) {
+  if (!ids?.length) return { ok: true };
+  const { error } = await sb().from("expenses").delete().in("id", ids);
+  if (error) throw new Error(error.message);
+  return { ok: true };
+}
+
+async function sbBulkUpdateCategory(ids, category) {
+  const { error } = await sb().from("expenses").update({ category }).in("id", ids);
+  if (error) throw new Error(error.message);
+  return { ok: true };
+}
+
+async function sbBulkUpdateSplit(ids, splitWith, payer) {
+  const { error } = await sb().from("expenses").update({ split_with: splitWith, payer }).in("id", ids);
+  if (error) throw new Error(error.message);
+  return { ok: true };
+}
+
+// ── IMPORTAÇÕES ───────────────────────────────────────────────────────
+
+async function sbAddImports(items, sessionInfo) {
+  if (!items?.length) return { ok: true, added: 0 };
+  const supa = sb();
+
+  // Registra sessão
+  if (sessionInfo?.sessionId) {
+    await supa.from("import_sessions").upsert({
+      id: sessionInfo.sessionId,
+      account_id: sessionInfo.accountId || null,
+      account_name: sessionInfo.accountName || null,
+      filename: sessionInfo.filename || null,
+      format: sessionInfo.format || null,
+      total_count: items.length,
+      total_amount: items.reduce((s, i) => s + (Number(i.totalAmount) || 0), 0)
+    }, { onConflict: "id" });
+  }
+
+  const rows = items.map(im => ({
+    id: im.id,
+    account_id: im.accountId || "",
+    date: im.date || null,
+    title: im.title || "",
+    original_amount: im.originalAmount != null ? Number(im.originalAmount) : null,
+    total_amount: Number(im.totalAmount) || 0,
+    status: im.status || "pendente",
+    category: im.category || null,
+    reason: im.reason || null,
+    installment: im.installment || null,
+    hash: im.hash || null,
+    session_id: sessionInfo?.sessionId || null
+  }));
+
+  // Upsert por id — duplicatas por hash serão visíveis mas id é único
+  const { error } = await supa.from("imports").upsert(rows, { onConflict: "id" });
+  if (error) throw new Error(error.message);
+  return { ok: true, added: rows.length };
+}
+
+async function sbUpdateImport(id, updates) {
+  const map = { status: "status", category: "category", expenseId: "expense_id" };
+  const dbUp = {};
+  Object.entries(updates).forEach(([k, v]) => { if (map[k]) dbUp[map[k]] = v; });
+  const { error } = await sb().from("imports").update(dbUp).eq("id", id);
+  if (error) throw new Error(error.message);
+  return { ok: true };
+}
+
+async function sbDeleteImport(id) {
+  const { error } = await sb().from("imports").delete().eq("id", id);
+  if (error) throw new Error(error.message);
+  return { ok: true };
+}
+
+async function sbDeleteImportSession(sessionId, alsoDeleteExpenses) {
+  const supa = sb();
+
+  if (alsoDeleteExpenses) {
+    // Apaga despesas vinculadas às importações desta sessão
+    const { data: sessionImps } = await supa.from("imports").select("id").eq("session_id", sessionId);
+    const impIds = (sessionImps || []).map(i => i.id);
+    if (impIds.length > 0) {
+      await supa.from("expenses").delete().in("import_id", impIds);
+    }
+  }
+
+  // Apaga importações da sessão
+  const { error } = await supa.from("imports").delete().eq("session_id", sessionId);
+  if (error) throw new Error(error.message);
+
+  // Apaga registro da sessão
+  await supa.from("import_sessions").delete().eq("id", sessionId);
+  return { ok: true };
+}
+
+async function sbLaunchImports(ids, expenseRows) {
+  const supa = sb();
+
+  // Salva despesas
+  if (expenseRows?.length) {
+    const rows = expenseRows.map(expToDb);
+    const { error } = await supa.from("expenses").upsert(rows, { onConflict: "id" });
+    if (error) throw new Error("Despesas: " + error.message);
+    // Aprendizado em background
+    expenseRows.forEach(e => { if (e.merchant && e.category) sbUpdateLearning(e.merchant, e.category); });
+  }
+
+  // Atualiza status das importações
+  const { error } = await supa.from("imports").update({ status: "lancada" }).in("id", ids);
+  if (error) throw new Error("Importações: " + error.message);
+  return { ok: true, launched: ids.length };
+}
+
+// ── VINCULAR / DESVINCULAR ────────────────────────────────────────────
+
+async function sbLinkExpense(expenseId, importId, accountName) {
+  const supa = sb();
+  await Promise.all([
+    supa.from("expenses").update({ import_id: importId, account: accountName || null }).eq("id", expenseId),
+    supa.from("imports").update({ expense_id: expenseId, status: "vinculada" }).eq("id", importId)
+  ]);
+  return { ok: true };
+}
+
+async function sbUnlinkExpense(expenseId, merchant, importTitle, currentPenalties) {
+  const supa = sb();
+
+  // Descobre import vinculado
+  const { data } = await supa.from("expenses").select("import_id").eq("id", expenseId).single();
+  const importId = data?.import_id;
+
+  await Promise.all([
+    supa.from("expenses").update({ import_id: null }).eq("id", expenseId),
+    importId ? supa.from("imports").update({ expense_id: null, status: "pendente" }).eq("id", importId) : Promise.resolve()
+  ]);
+
+  // Registra penalidade de matching
+  if (merchant && importTitle) {
+    const key = (merchant + "|" + importTitle).toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+    const current = (currentPenalties || {})[key] || 0;
+    await supa.from("match_penalties").upsert({ key, penalty: current + 15 }, { onConflict: "key" });
+  }
+
+  return { ok: true };
+}
+
+// ── APRENDIZADO ───────────────────────────────────────────────────────
+
+async function sbUpdateLearning(merchant, category) {
+  if (!merchant || !category) return;
+  const key = merchant.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
+  // Ignora erros — não crítico
+  sb().from("learning").upsert({ merchant_key: key, merchant, category }, { onConflict: "merchant_key" }).then(() => {});
+}
+
+async function sbDeleteLearning(merchant) {
+  const key = merchant.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
+  await sb().from("learning").delete().eq("merchant_key", key);
+}
+
+// ── PAGADORES ─────────────────────────────────────────────────────────
+
+async function sbAddPayer(name) {
+  const { error } = await sb().from("payers").insert({ name });
+  if (error) throw new Error(error.message);
+  return { ok: true };
+}
+
+async function sbDeletePayer(name) {
+  const { error } = await sb().from("payers").delete().eq("name", name);
+  if (error) throw new Error(error.message);
+  return { ok: true };
+}
+
+// ── CATEGORIAS ────────────────────────────────────────────────────────
+
+async function sbAddCategory(cat) {
+  const name = cat.n || cat.name;
+  const emoji = cat.i || cat.emoji || "";
+  const { error } = await sb().from("categories").insert({ name, emoji });
+  if (error) throw new Error(error.message);
+  return { ok: true };
+}
+
+async function sbDeleteCategory(name) {
+  const { error } = await sb().from("categories").delete().eq("name", name);
+  if (error) throw new Error(error.message);
+  return { ok: true };
+}
+
+// ── CONTAS ────────────────────────────────────────────────────────────
+
+async function sbAddAccount(account) {
+  const { error } = await sb().from("accounts").insert({
+    id: account.id, name: account.name, payer: account.payer, color: account.color || null
+  });
+  if (error) throw new Error(error.message);
+  return { ok: true };
+}
+
+async function sbDeleteAccount(id) {
+  const { error } = await sb().from("accounts").delete().eq("id", id);
+  if (error) throw new Error(error.message);
+  return { ok: true };
+}
+
+// ── ADMIN ─────────────────────────────────────────────────────────────
+
+async function sbResetData() {
+  const supa = sb();
+  const [r1, r2, r3] = await Promise.all([
+    supa.from("expenses").delete().neq("id", "___NONE___"),
+    supa.from("imports").delete().neq("id", "___NONE___"),
+    supa.from("match_penalties").delete().neq("key", "___NONE___")
+  ]);
+  const errs = [r1, r2, r3].filter(r => r.error).map(r => r.error.message);
+  if (errs.length) throw new Error(errs.join("; "));
+  return { ok: true, deleted: { gastos: 0, importacoes: 0, matchAprendizado: 0 } };
+}
+
+async function sbGetDuplicates(expenses) {
+  const seen = new Map();
+  const dupes = [];
+  [...expenses]
+    .sort((a, b) => (a.at || "").localeCompare(b.at || ""))
+    .forEach(e => {
+      const key = `${(e.merchant || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"")}|${e.date}|${Number(e.total).toFixed(2)}`;
+      if (seen.has(key)) dupes.push(e);
+      else seen.set(key, e.id);
+    });
+  return dupes;
+}
+
+async function sbFixPayersPreview(expenses, accounts) {
+  const payerByAccount = {};
+  accounts.forEach(a => { if (a.name && a.payer) payerByAccount[a.name] = a.payer; });
+  return expenses.filter(e =>
+    e.account && payerByAccount[e.account] && e.payer !== payerByAccount[e.account]
+  ).map(e => ({ id: e.id, account: e.account, current: e.payer, correct: payerByAccount[e.account] }));
+}
+
+async function sbApplyFixPayers(fixes) {
+  if (!fixes?.length) return { ok: true, fixed: 0 };
+  // Agrupa por pagador correto para batch updates
+  const byPayer = {};
+  fixes.forEach(f => { (byPayer[f.correct] = byPayer[f.correct] || []).push(f.id); });
+  for (const [payer, ids] of Object.entries(byPayer)) {
+    const { error } = await sb().from("expenses").update({ payer }).in("id", ids);
+    if (error) throw new Error(error.message);
+  }
+  return { ok: true, fixed: fixes.length };
+}
 const {useState,useEffect,useRef,useCallback,useMemo} = React;
 
 const DEFAULT_CATS=[
@@ -546,237 +946,6 @@ function parseBradescoCC(text,accountId,payers){
 }
 
 // Hash simples para dedupe
-// ═══════════════════════════════════════════════════════════════════
-// SUPABASE — config + cliente
-// ═══════════════════════════════════════════════════════════════════
-const SUPABASE_URL = "https://obvehcuxdludclwgkwzp.supabase.co";
-const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9idmVoY3V4ZGx1ZGNsd2drd3pwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzczMDYxNTIsImV4cCI6MjA5Mjg4MjE1Mn0.g2lShJdXw-FXERCPCYfcub8--lMv_kkqueZu4ulbR8E";
-
-let _sb = null;
-function sb() {
-  if (_sb) return _sb;
-  if (!window.supabase) throw new Error("Cliente Supabase não carregado");
-  _sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-  return _sb;
-}
-
-// Migração: lê tudo do Sheets via Apps Script e escreve no Supabase
-async function migrateSheetsToSupabase(scriptUrl, onProgress) {
-  const log = (msg) => { console.log("[migrate]", msg); if (onProgress) onProgress(msg); };
-  
-  log("📡 Lendo dados do Sheets...");
-  const r = await callApi(scriptUrl, "getAll");
-  if (!r.ok) throw new Error("Erro ao ler do Sheets: " + (r.error || "desconhecido"));
-  
-  const expenses = r.expenses || [];
-  const imports = r.imports || [];
-  const payers = r.payers || [];
-  const categories = r.categories || [];
-  const accounts = r.accounts || [];
-  const learning = r.learning || {};
-  const matchPenalties = r.matchPenalties || {};
-  
-  log(`📊 ${expenses.length} despesas, ${imports.length} importações, ${accounts.length} contas`);
-  
-  const supa = sb();
-  const stats = { expenses: 0, imports: 0, payers: 0, categories: 0, accounts: 0, learning: 0, penalties: 0, errors: [] };
-  
-  // Helper: normaliza data para YYYY-MM-DD ou null
-  const normDate = (d) => {
-    if (!d) return null;
-    if (typeof d === "string") {
-      // Já é YYYY-MM-DD?
-      if (/^\d{4}-\d{2}-\d{2}/.test(d)) return d.slice(0, 10);
-      // Tenta parse
-      try {
-        const parsed = new Date(d);
-        if (isNaN(parsed.getTime())) return null;
-        return parsed.toISOString().slice(0, 10);
-      } catch { return null; }
-    }
-    if (d instanceof Date) {
-      if (isNaN(d.getTime())) return null;
-      return d.toISOString().slice(0, 10);
-    }
-    return null;
-  };
-  
-  // Helper: extrai nome de categoria de qualquer formato
-  const catName = (c) => {
-    if (!c) return null;
-    if (typeof c === "string") return c.trim() || null;
-    return (c.name || c.label || c.nome || c.n || "").trim() || null;
-  };
-  const catEmoji = (c) => {
-    if (!c || typeof c === "string") return "";
-    return c.emoji || c.icon || c.i || "";
-  };
-  
-  // ─── PAGADORES ─────────────────────────────────────────────────────
-  log(`👥 Migrando ${payers.length} pessoas...`);
-  for (const p of payers) {
-    const name = typeof p === "string" ? p.trim() : (p?.name || "").trim();
-    if (!name) { stats.errors.push(`payer vazio`); continue; }
-    const { error } = await supa.from("payers").upsert({ name }, { onConflict: "name" });
-    if (error) stats.errors.push(`payer ${name}: ${error.message}`);
-    else stats.payers++;
-  }
-  
-  // ─── CATEGORIAS ────────────────────────────────────────────────────
-  log(`🏷️ Migrando ${categories.length} categorias...`);
-  // Debug: mostra primeira categoria para ver formato real
-  if (categories.length > 0) log(`   formato detectado: ${JSON.stringify(categories[0]).slice(0,80)}`);
-  for (const c of categories) {
-    const name = catName(c);
-    if (!name) { stats.errors.push(`categoria sem nome: ${JSON.stringify(c).slice(0,60)}`); continue; }
-    const emoji = catEmoji(c);
-    const { error } = await supa.from("categories").upsert({ name, emoji }, { onConflict: "name" });
-    if (error) stats.errors.push(`category ${name}: ${error.message}`);
-    else stats.categories++;
-  }
-  
-  // ─── CONTAS ────────────────────────────────────────────────────────
-  log(`🏦 Migrando ${accounts.length} contas...`);
-  for (const a of accounts) {
-    if (!a?.id || !a?.name) { stats.errors.push(`conta inválida: ${JSON.stringify(a).slice(0,60)}`); continue; }
-    const { error } = await supa.from("accounts").upsert({
-      id: String(a.id), name: String(a.name), payer: String(a.payer || ""), color: a.color || null
-    }, { onConflict: "id" });
-    if (error) stats.errors.push(`account ${a.name}: ${error.message}`);
-    else stats.accounts++;
-  }
-  
-  // ─── APRENDIZADO ───────────────────────────────────────────────────
-  const learningEntries = Object.entries(learning);
-  log(`🧠 Migrando ${learningEntries.length} aprendizados...`);
-  if (learningEntries.length > 0) log(`   formato: chave="${learningEntries[0][0].slice(0,30)}" valor=${JSON.stringify(learningEntries[0][1]).slice(0,60)}`);
-  
-  const learningRows = [];
-  for (const [merchant, val] of learningEntries) {
-    const merchantName = String(merchant || "").trim();
-    if (!merchantName) continue;
-    const cat = typeof val === "string" ? val : (val?.category || val?.cat || "");
-    if (!cat) continue;
-    learningRows.push({
-      merchant_key: merchantName.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim(),
-      merchant: merchantName,
-      category: cat,
-      count: typeof val === "object" && val?.count ? Number(val.count) : 1
-    });
-  }
-  if (learningRows.length > 0) {
-    // upsert em batch
-    const { error } = await supa.from("learning").upsert(learningRows, { onConflict: "merchant_key" });
-    if (error) {
-      // Se falhar em batch, tenta um por um
-      log(`   ⚠️ Batch falhou, tentando individualmente...`);
-      for (const row of learningRows) {
-        const { error: e2 } = await supa.from("learning").upsert(row, { onConflict: "merchant_key" });
-        if (e2) stats.errors.push(`learning ${row.merchant}: ${e2.message}`);
-        else stats.learning++;
-      }
-    } else {
-      stats.learning = learningRows.length;
-    }
-  }
-  
-  // ─── PENALIDADES ───────────────────────────────────────────────────
-  const penaltyEntries = Object.entries(matchPenalties);
-  log(`⚖️ Migrando ${penaltyEntries.length} penalidades...`);
-  const penaltyRows = penaltyEntries.map(([key, penalty]) => ({ key, penalty: Number(penalty) || 0 }));
-  if (penaltyRows.length > 0) {
-    const { error } = await supa.from("match_penalties").upsert(penaltyRows, { onConflict: "key" });
-    if (error) stats.errors.push(`penalties: ${error.message}`);
-    else stats.penalties = penaltyRows.length;
-  }
-  
-  // ─── DESPESAS (em batches de 200, com fallback individual) ─────────
-  log(`💰 Migrando ${expenses.length} despesas...`);
-  await migrateBatchWithRetry(supa, "expenses", expenses, (e) => ({
-    id: String(e.id || ""),
-    date: normDate(e.date) || normDate(e.at) || new Date().toISOString().slice(0,10),
-    merchant: String(e.merchant || "").trim() || "(sem nome)",
-    category: e.category || null,
-    total: Number(e.total) || 0,
-    payer: e.payer || null,
-    items: Array.isArray(e.items) ? e.items : [],
-    receipt_url: e.receiptUrl || null,
-    split_with: Array.isArray(e.splitWith) ? e.splitWith : (e.payer ? [e.payer] : []),
-    account: e.account || null,
-    import_id: e.importId || null,
-    reviewed: e.reviewed !== false,
-    drive_file_id: e.driveFileId || null,
-    at: e.at || new Date().toISOString()
-  }), stats, "expenses", log);
-  
-  // ─── IMPORTAÇÕES (em batches de 200, com fallback individual) ──────
-  log(`💳 Migrando ${imports.length} importações...`);
-  await migrateBatchWithRetry(supa, "imports", imports, (im) => ({
-    id: String(im.id || ""),
-    account_id: String(im.accountId || ""),
-    date: normDate(im.date),
-    title: String(im.title || "").trim() || "(sem título)",
-    original_amount: im.originalAmount != null ? Number(im.originalAmount) : null,
-    total_amount: Number(im.totalAmount) || 0,
-    status: im.status || "pendente",
-    category: im.category || null,
-    reason: im.reason || null,
-    installment: im.installment || null,
-    hash: im.hash || null,
-    session_id: im.sessionId || null,
-    expense_id: im.expenseId || null
-  }), stats, "imports", log);
-  
-  log(`✅ Migração concluída! ${stats.errors.length} erros`);
-  return stats;
-}
-
-// Insere em batches; se um batch falhar, retenta item por item para identificar problemas
-async function migrateBatchWithRetry(supa, table, items, transform, stats, statKey, log) {
-  const BATCH_SIZE = 200;
-  const batches = chunkArray(items, BATCH_SIZE);
-  
-  for (let i = 0; i < batches.length; i++) {
-    const rawBatch = batches[i];
-    const batch = rawBatch.map(transform).filter(x => x.id); // só com id válido
-    
-    if (batch.length === 0) continue;
-    
-    const { error } = await supa.from(table).upsert(batch, { onConflict: "id" });
-    
-    if (!error) {
-      stats[statKey] += batch.length;
-      log(`  ${table === "expenses" ? "💰" : "💳"} ${stats[statKey]}/${items.length}`);
-    } else {
-      // Batch falhou — tenta um por um
-      log(`  ⚠️ Batch ${i+1} falhou (${error.message.slice(0,60)}), tentando individualmente...`);
-      let inBatchOk = 0, inBatchFail = 0;
-      for (const row of batch) {
-        const { error: e2 } = await supa.from(table).upsert(row, { onConflict: "id" });
-        if (e2) {
-          stats.errors.push(`${table} id=${row.id}: ${e2.message.slice(0,80)}`);
-          inBatchFail++;
-        } else {
-          stats[statKey]++;
-          inBatchOk++;
-        }
-      }
-      log(`  ${table === "expenses" ? "💰" : "💳"} ${stats[statKey]}/${items.length} (${inBatchFail} erros nesta batch)`);
-    }
-  }
-}
-
-function chunkArray(arr, size) {
-  const out = [];
-  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
-  return out;
-}
-
-// Wrapper para chamar o api() externo (que usa fetch ao Apps Script)
-async function callApi(scriptUrl, action, params) {
-  return await api(scriptUrl, action, params);
-}
-
 function hashStr(s){
   let h=0;
   for(let i=0;i<s.length;i++)h=((h<<5)-h+s.charCodeAt(i))|0;
@@ -3209,78 +3378,70 @@ function App(){
   },[cfg.scriptUrl]);
 
   const syncDown=useCallback(async()=>{
-    if(!cfg.scriptUrl)return;
     setSyncing(true);
     try{
-      const r=await api(cfg.scriptUrl,"getAll");
+      const r=await sbGetAll();
       if(r.ok){
-        // Deduplicação defensiva: garante 1 item por ID (evita bug visual)
-        const dedupById=arr=>{
-          const m=new Map();
-          (arr||[]).forEach(x=>{if(x?.id)m.set(x.id,x);});
-          return [...m.values()];
-        };
+        const inFlight=inFlightImportsRef.current;
+        const dedupById=arr=>{const m=new Map();(arr||[]).forEach(x=>{if(x?.id)m.set(x.id,x);});return[...m.values()];};
         const cleanImports=dedupById(r.imports);
         const cleanExpenses=dedupById(r.expenses);
-        
-        // Items em trânsito: não deixa o servidor sobrescrever otimismo
-        const inFlight=inFlightImportsRef.current;
-        
         if(inFlight.size>0){
           setExpenses(prev=>{
-            const optimistic=prev.filter(e=>
-              e.importId&&inFlight.has(e.importId)&&
-              !cleanExpenses.some(se=>se.importId===e.importId)
-            );
-            return [...optimistic,...cleanExpenses];
+            const optimistic=prev.filter(e=>e.importId&&inFlight.has(e.importId)&&!cleanExpenses.some(se=>se.importId===e.importId));
+            return[...optimistic,...cleanExpenses];
           });
-          setImports(cleanImports.map(imp=>
-            inFlight.has(imp.id)?{...imp,status:"lancada"}:imp
-          ));
+          setImports(cleanImports.map(imp=>inFlight.has(imp.id)?{...imp,status:"lancada"}:imp));
         }else{
           setExpenses(cleanExpenses);
           setImports(cleanImports);
         }
-        
         setLmap(r.learning||{});
         if(r.payers?.length)setPayers(r.payers);
         if(r.categories?.length)setCats(r.categories);
         setAccounts(r.accounts||[]);
         setMatchPenalties(r.matchPenalties||{});
-      }else throw new Error(r.error);
+      }
       await checkUploads();
     }catch(err){toast_("⚠️ "+err.message,"err");}
     finally{setSyncing(false);}
-  },[cfg.scriptUrl,toast_,checkUploads]);
+  },[toast_,checkUploads]);
 
-  useEffect(()=>{if(cfg.scriptUrl)syncDown();},[cfg.scriptUrl]);
+  useEffect(()=>{syncDown();},[]);
 
   const saveExpense=async(exp)=>{
-    const e={...exp,id:Date.now()+"",at:new Date().toISOString()};
+    const e={...exp,id:"exp_"+Date.now()+"_"+Math.floor(Math.random()*9999),at:new Date().toISOString()};
     setExpenses(p=>[e,...p]);
     if(e.merchant&&e.category)setLmap(p=>({...p,[e.merchant]:e.category}));
-    try{const r=await api(cfg.scriptUrl,"save",{expense:e});if(!r.ok)throw new Error(r.error);if(r.driveUrl)setExpenses(p=>p.map(x=>x.id===e.id?{...x,driveUrl:r.driveUrl}:x));toast_("✅ Salvo!");}
-    catch(err){toast_("⚠️ Local: "+err.message,"err");}
+    try{
+      // Drive upload (Apps Script) se tiver imagem base64
+      if(e.imageBase64&&cfg.scriptUrl){
+        const dr=await api(cfg.scriptUrl,"uploadReceipt",{base64:e.imageBase64,mimeType:e.mimeType||"image/jpeg",merchant:e.merchant,date:e.date});
+        if(dr.ok&&dr.driveUrl){e.receiptUrl=dr.driveUrl;e.driveFileId=dr.fileId;setExpenses(p=>p.map(x=>x.id===e.id?{...x,receiptUrl:dr.driveUrl,driveFileId:dr.fileId}:x));}
+      }
+      await sbSaveExpense(e);
+      toast_("✅ Salvo!");
+    }catch(err){toast_("⚠️ "+err.message,"err");}
     return e;
   };
-  
-  // Salva expense E vincula com import bancário existente
+
   const saveLinkedExpense=async(exp,importId)=>{
-    const e={...exp,id:Date.now()+"",at:new Date().toISOString()};
+    const e={...exp,id:"exp_"+Date.now()+"_"+Math.floor(Math.random()*9999),at:new Date().toISOString(),importId};
     setExpenses(p=>[e,...p]);
     if(e.merchant&&e.category)setLmap(p=>({...p,[e.merchant]:e.category}));
     setImports(p=>p.map(i=>i.id===importId?{...i,status:"vinculada",expenseId:e.id}:i));
     try{
-      const r=await api(cfg.scriptUrl,"save",{expense:e});
-      if(!r.ok)throw new Error(r.error);
-      if(r.driveUrl)setExpenses(p=>p.map(x=>x.id===e.id?{...x,driveUrl:r.driveUrl}:x));
-      // Faz o link no backend
-      await api(cfg.scriptUrl,"linkExpense",{expenseId:e.id,importId,accountName:e.account});
+      if(e.imageBase64&&cfg.scriptUrl){
+        const dr=await api(cfg.scriptUrl,"uploadReceipt",{base64:e.imageBase64,mimeType:e.mimeType||"image/jpeg",merchant:e.merchant,date:e.date});
+        if(dr.ok&&dr.driveUrl){e.receiptUrl=dr.driveUrl;e.driveFileId=dr.fileId;setExpenses(p=>p.map(x=>x.id===e.id?{...x,receiptUrl:dr.driveUrl,driveFileId:dr.fileId}:x));}
+      }
+      await sbSaveExpense(e);
+      await sbLinkExpense(e.id,importId,e.account);
       toast_("✅ Salvo e vinculado!");
-    }catch(err){toast_("⚠️ Local: "+err.message,"err");}
+    }catch(err){toast_("⚠️ "+err.message,"err");}
     return e;
   };
-  
+
   const unlinkExpenseFn=async(expenseId,merchant,importTitle)=>{
     const exp=expenses.find(e=>e.id===expenseId);
     if(!exp||!exp.importId)return;
@@ -3288,170 +3449,107 @@ function App(){
     const oldImp=imports.find(i=>i.id===oldImpId);
     const merchantToLog=merchant||exp.merchant;
     const titleToLog=importTitle||(oldImp?oldImp.title:"");
-    
     setExpenses(p=>p.map(e=>e.id===expenseId?{...e,importId:""}:e));
     setImports(p=>p.map(i=>i.id===oldImpId?{...i,status:"pendente",expenseId:""}:i));
-    
-    // Atualiza penalty local imediatamente (otimista)
     if(merchantToLog&&titleToLog){
       const key=normMatchKey(merchantToLog)+"|"+normMatchKey(titleToLog);
       setMatchPenalties(p=>({...p,[key]:(p[key]||0)+1}));
     }
-    
-    try{
-      await api(cfg.scriptUrl,"unlinkExpense",{expenseId,merchant:merchantToLog,importTitle:titleToLog});
-      toast_("✅ Desvinculado · sistema aprendeu");
-    }catch(err){toast_("⚠️ "+err.message,"err");}
+    try{await sbUnlinkExpense(expenseId,merchantToLog,titleToLog,matchPenalties);toast_("✅ Desvinculado · sistema aprendeu");}
+    catch(err){toast_("⚠️ "+err.message,"err");}
   };
-  
+
   const linkExpenseFn=async(expenseId,importId,accountName)=>{
     setExpenses(p=>p.map(e=>e.id===expenseId?{...e,importId,account:accountName||e.account}:e));
     setImports(p=>p.map(i=>i.id===importId?{...i,status:"vinculada",expenseId}:i));
-    try{
-      await api(cfg.scriptUrl,"linkExpense",{expenseId,importId,accountName});
-      toast_("✅ Vinculado");
-    }catch(err){toast_("⚠️ "+err.message,"err");}
+    try{await sbLinkExpense(expenseId,importId,accountName);toast_("✅ Vinculado");}
+    catch(err){toast_("⚠️ "+err.message,"err");}
   };
-  
+
   const updateExpenseFn=async(id,updates)=>{
     setExpenses(p=>p.map(e=>e.id===id?{...e,...updates}:e));
-    if(updates.merchant&&updates.category){
-      setLmap(p=>({...p,[updates.merchant]:updates.category}));
-    }
-    try{
-      await api(cfg.scriptUrl,"updateExpense",{id,updates});
-      toast_("✅ Atualizado");
-    }catch(err){toast_("⚠️ "+err.message,"err");}
+    if(updates.merchant&&updates.category)setLmap(p=>({...p,[updates.merchant]:updates.category}));
+    try{await sbUpdateExpense(id,updates);toast_("✅ Atualizado");}
+    catch(err){toast_("⚠️ "+err.message,"err");}
   };
-  
+
   const saveAndReturnHome=async(exp)=>{await saveExpense(exp);setView("home");};
   const saveLinkedAndReturnHome=async(exp,importId)=>{await saveLinkedExpense(exp,importId);setView("home");};
-  
-  // Versão silenciosa (sem toast individual) usada no processamento em massa
+
   const saveBulkExpense=async(exp,importId)=>{
-    const e={...exp,id:Date.now()+"_"+Math.floor(Math.random()*10000),at:new Date().toISOString(),reviewed:false};
+    const e={...exp,id:"exp_"+Date.now()+"_"+Math.floor(Math.random()*9999),at:new Date().toISOString(),reviewed:false};
     setExpenses(p=>[e,...p]);
     if(e.merchant&&e.category)setLmap(p=>({...p,[e.merchant]:e.category}));
-    if(importId){
-      setImports(p=>p.map(i=>i.id===importId?{...i,status:"vinculada",expenseId:e.id}:i));
-    }
+    if(importId)setImports(p=>p.map(i=>i.id===importId?{...i,status:"vinculada",expenseId:e.id}:i));
     try{
-      const r=await api(cfg.scriptUrl,"save",{expense:e});
-      if(!r.ok)throw new Error(r.error);
-      if(r.driveUrl)setExpenses(p=>p.map(x=>x.id===e.id?{...x,driveUrl:r.driveUrl}:x));
-      if(importId){
-        await api(cfg.scriptUrl,"linkExpense",{expenseId:e.id,importId,accountName:e.account});
+      if(e.imageBase64&&cfg.scriptUrl){
+        const dr=await api(cfg.scriptUrl,"uploadReceipt",{base64:e.imageBase64,mimeType:e.mimeType||"image/jpeg",merchant:e.merchant,date:e.date});
+        if(dr.ok&&dr.driveUrl){e.receiptUrl=dr.driveUrl;e.driveFileId=dr.fileId;setExpenses(p=>p.map(x=>x.id===e.id?{...x,receiptUrl:dr.driveUrl,driveFileId:dr.fileId}:x));}
       }
+      await sbSaveExpense(e);
+      if(importId)await sbLinkExpense(e.id,importId,e.account);
       return e;
     }catch(err){
-      // remove do estado local se falhou no backend
       setExpenses(p=>p.filter(x=>x.id!==e.id));
       return null;
     }
   };
   const deleteUploadFile=async(id)=>{try{await api(cfg.scriptUrl,"moveToProcessed",{id});setPendingUploads(p=>p.filter(u=>u.id!==id));}catch{}};
-  const finishUploadProcessing=()=>{setView("home");checkUploads();toast_("✅ Concluído!");};
-  const deleteExpense=async(id)=>{setExpenses(p=>p.filter(e=>e.id!==id));try{await api(cfg.scriptUrl,"deleteExpense",{id});}catch{}toast_("✅ Excluído");};
-  const addPayer=async(name)=>{setPayers(p=>[...p,name]);try{await api(cfg.scriptUrl,"addPayer",{name});}catch{}};
-  const deletePayer=async(name)=>{setPayers(p=>p.filter(x=>x!==name));try{await api(cfg.scriptUrl,"deletePayer",{name});}catch{}};
-  const deleteLearning=async(merchant)=>{setLmap(p=>{const n={...p};delete n[merchant];return n;});try{await api(cfg.scriptUrl,"deleteLearning",{merchant});}catch{}};
-  const addCategory=async(cat)=>{setCats(p=>[...p,cat]);try{await api(cfg.scriptUrl,"addCategory",{category:cat});toast_("✅ Categoria criada!");}catch(err){toast_("⚠️ Local","err");}};
-  const deleteCategory=async(name)=>{setCats(p=>p.filter(c=>c.n!==name));try{await api(cfg.scriptUrl,"deleteCategory",{name});toast_("✅ Removida");}catch{}};
+  const deleteExpense=async(id)=>{setExpenses(p=>p.filter(e=>e.id!==id));try{await sbDeleteExpense(id);}catch{}toast_("✅ Excluído");};
+  const addPayer=async(name)=>{setPayers(p=>[...p,name]);try{await sbAddPayer(name);}catch{}};
+  const deletePayer=async(name)=>{setPayers(p=>p.filter(x=>x!==name));try{await sbDeletePayer(name);}catch{}};
+  const deleteLearning=async(merchant)=>{setLmap(p=>{const n={...p};delete n[merchant];return n;});try{await sbDeleteLearning(merchant);}catch{}};
+  const addCategory=async(cat)=>{setCats(p=>[...p,cat]);try{await sbAddCategory(cat);toast_("✅ Categoria criada!");}catch(err){toast_("⚠️ Local","err");}};
+  const deleteCategory=async(name)=>{setCats(p=>p.filter(c=>c.n!==name));try{await sbDeleteCategory(name);toast_("✅ Removida");}catch{}};
   const changeUrl=(newUrl)=>{if(!newUrl?.trim())return;setCfg({scriptUrl:newUrl.trim()});setExpenses([]);setLmap({});setPayers(["Eu"]);setCats(DEFAULT_CATS);setAccounts([]);setImports([]);setMatchPenalties({});toast_("🔄 URL atualizada!");};
   
   const bulkUpdateCategoryFn=async(ids,category)=>{
     if(!ids||ids.length===0)return;
     setExpenses(p=>p.map(e=>ids.includes(e.id)?{...e,category}:e));
-    let updated=0;
-    for(const id of ids){
-      try{
-        await api(cfg.scriptUrl,"updateExpense",{id,updates:{category}});
-        updated++;
-      }catch{}
-    }
-    toast_(`✅ ${updated} lançamento(s) atualizados para "${category}"`);
+    try{await sbBulkUpdateCategory(ids,category);toast_(`✅ ${ids.length} lançamento(s) atualizados para "${category}"`);}
+    catch(err){toast_("⚠️ "+err.message,"err");}
   };
   
   const bulkUpdateSplitFn=async(ids,splitWith,payer)=>{
     if(!ids||ids.length===0)return;
     setExpenses(p=>p.map(e=>ids.includes(e.id)?{...e,splitWith,payer}:e));
-    let updated=0;
-    for(const id of ids){
-      try{
-        await api(cfg.scriptUrl,"updateExpense",{id,updates:{splitWith,payer}});
-        updated++;
-      }catch{}
-    }
-    toast_(`✅ ${updated} lançamento(s) atualizados`);
+    try{await sbBulkUpdateSplit(ids,splitWith,payer);toast_(`✅ ${ids.length} lançamento(s) atualizados`);}
+    catch(err){toast_("⚠️ "+err.message,"err");}
   };
 
   const resetDataFn=async()=>{
     if(!confirm("⚠️ ATENÇÃO\n\nIsso vai apagar:\n• TODAS as despesas\n• TODAS as importações pendentes\n• Aprendizado de vínculos bancários\n\nMantém: pessoas, categorias, contas e aprendizado de categorias.\n\nEsta ação NÃO pode ser desfeita.\n\nTem certeza?"))return;
     if(!confirm("Última confirmação: tem certeza absoluta?"))return;
     try{
-      const r=await api(cfg.scriptUrl,"resetData");
-      if(!r.ok)throw new Error(r.error||"Falha");
-      setExpenses([]);
-      setImports([]);
-      setMatchPenalties({});
-      const d=r.deleted||{};
-      toast_(`✅ Apagados: ${d.gastos||0} despesas, ${d.importacoes||0} importações, ${d.matchAprendizado||0} aprendizados`);
-    }catch(err){
-      toast_("⚠️ "+err.message,"err");
-    }
+      const r=await sbResetData();
+      setExpenses([]);setImports([]);setMatchPenalties({});
+      toast_("✅ Dados apagados");
+    }catch(err){toast_("⚠️ "+err.message,"err");}
   };
-  
-  // Mecanismo 2: move arquivo para upload/erros/
+
   const moveToErrorsFn=async(fileId)=>{
-    if(!fileId)return;
-    try{
-      await api(cfg.scriptUrl,"moveToErrors",{id:fileId});
-    }catch(err){
-      console.error("moveToErrors falhou:",err);
-    }
+    if(!fileId||!cfg.scriptUrl)return;
+    try{await api(cfg.scriptUrl,"moveToErrors",{id:fileId});}catch(err){console.error("moveToErrors:",err);}
   };
-  
+
   const fixPayersFn=async()=>{
-    // Mapa: nome da conta → dono
-    const accountByName={};
-    accounts.forEach(a=>{if(a.name&&a.payer)accountByName[a.name]=a.payer;});
-    
-    // Acha despesas com conta vinculada e pagador errado
-    const toFix=expenses.filter(e=>{
-      if(!e.account)return false;
-      const correctPayer=accountByName[e.account];
-      if(!correctPayer)return false;
-      return e.payer!==correctPayer;
-    });
-    
+    const toFix=await sbFixPayersPreview(expenses,accounts);
     if(toFix.length===0){toast_("✅ Nenhum pagador incorreto encontrado!");return;}
-    
-    // Monta preview
     let preview=`Encontradas ${toFix.length} despesa(s) com pagador incorreto:\n\n`;
-    toFix.slice(0,8).forEach(e=>{
-      const correct=accountByName[e.account];
-      preview+=`• ${(e.merchant||"?").slice(0,25)} (${brl(e.total)})\n  ${e.account}\n  ${e.payer} → ${correct}\n\n`;
+    toFix.slice(0,8).forEach(f=>{
+      const exp=expenses.find(e=>e.id===f.id);
+      preview+=`• ${(exp?.merchant||"?").slice(0,25)} (${brl(exp?.total||0)})\n  ${f.account}\n  ${f.current} → ${f.correct}\n\n`;
     });
     if(toFix.length>8)preview+=`... e mais ${toFix.length-8} despesas\n\n`;
     preview+=`Corrigir todas?`;
-    
     if(!confirm(preview))return;
-    
-    // Aplica correções
-    let fixed=0;
-    for(const e of toFix){
-      const correctPayer=accountByName[e.account];
-      // Atualiza splitWith: substitui o pagador antigo pelo correto
-      const newSplitWith=e.splitWith&&e.splitWith.length>0
-        ?e.splitWith.map(p=>p===e.payer?correctPayer:p)
-        :[correctPayer];
-      try{
-        await updateExpenseFn(e.id,{payer:correctPayer,splitWith:newSplitWith});
-        fixed++;
-      }catch{}
-    }
-    toast_(`✅ ${fixed} despesa(s) corrigida(s)`);
+    try{
+      const r=await sbApplyFixPayers(toFix);
+      setExpenses(p=>p.map(e=>{const f=toFix.find(x=>x.id===e.id);return f?{...e,payer:f.correct}:e;}));
+      toast_(`✅ ${r.fixed} despesa(s) corrigida(s)`);
+    }catch(err){toast_("⚠️ "+err.message,"err");}
   };
+
   const cleanupDuplicatesFn=async()=>{
     // Agrupa por chave: estabelecimento + data + valor
     const norm=s=>(s||"").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"").trim();
@@ -3491,95 +3589,79 @@ function App(){
     const idsToDelete=[];
     dupGroups.forEach(group=>{
       const sorted=[...group].sort((a,b)=>(a.at||"").localeCompare(b.at||""));
-      // Pula o primeiro (mantém), apaga os demais
       sorted.slice(1).forEach(e=>idsToDelete.push(e.id));
     });
-    
     try{
-      const r=await api(cfg.scriptUrl,"bulkDelete",{ids:idsToDelete});
-      if(!r.ok)throw new Error(r.error||"Falha");
-      // Atualiza estado local
+      await sbBulkDeleteExpenses(idsToDelete);
       const idSet=new Set(idsToDelete);
       setExpenses(p=>p.filter(e=>!idSet.has(e.id)));
-      toast_(`✅ ${r.deleted||idsToDelete.length} duplicatas removidas`);
-    }catch(err){
-      toast_("⚠️ "+err.message,"err");
-    }
+      toast_(`✅ ${idsToDelete.length} duplicatas removidas`);
+    }catch(err){toast_("⚠️ "+err.message,"err");}
   };
 
   // ─── ACCOUNTS / IMPORTS ─────────────────────────────
   const addAccount=async(acc)=>{
-    try{const r=await api(cfg.scriptUrl,"addAccount",{account:acc});
-      if(r.ok){setAccounts(p=>[...p,{...acc,id:r.id}]);toast_("✅ Conta criada!");return r;}
-      throw new Error(r.error);
+    try{
+      await sbAddAccount(acc);
+      setAccounts(p=>[...p,acc]);
+      toast_("✅ Conta criada!");
+      return {ok:true,id:acc.id};
     }catch(err){toast_("⚠️ "+err.message,"err");return null;}
   };
   const deleteAccountFn=async(id)=>{
     setAccounts(p=>p.filter(a=>a.id!==id));
-    try{await api(cfg.scriptUrl,"deleteAccount",{id});toast_("✅ Removida");}catch{}
+    try{await sbDeleteAccount(id);toast_("✅ Removida");}catch{}
   };
-  const uploadCsv=async(items)=>{
+
+  const uploadCsv=async(items,sessionInfo)=>{
     try{
-      // Auto-vincula matches fortes ANTES de mandar (com penalties)
+      // Auto-vincula matches fortes
       const enrichedItems=items.map(it=>{
         if(it.status!=="pendente")return it;
-        const matches=findExpenseMatches(it,expenses,80,matchPenalties); // só matches fortes
-        if(matches.length>0){
-          // Auto-vincula
-          return {...it,_autoLinkExpenseId:matches[0].exp.id};
-        }
+        const matches=findExpenseMatches(it,expenses,80,matchPenalties);
+        if(matches.length>0)return {...it,_autoLinkExpenseId:matches[0].exp.id};
         return it;
       });
-      
-      const r=await api(cfg.scriptUrl,"addImports",{imports:enrichedItems.map(({_autoLinkExpenseId,...rest})=>rest)});
+
+      const r=await sbAddImports(enrichedItems.map(({_autoLinkExpenseId,...rest})=>rest),sessionInfo);
       if(!r.ok)throw new Error(r.error);
-      
-      // Após sync, faz os links automáticos
+
       await syncDown();
-      
-      // Pega imports recém-criados (matched por hash)
+
+      // Faz links automáticos
       const linksToCreate=enrichedItems.filter(i=>i._autoLinkExpenseId);
       if(linksToCreate.length>0){
-        // Re-fetch para pegar os IDs corretos do backend
-        const fresh=await api(cfg.scriptUrl,"getAll");
-        if(fresh.ok){
-          const accById=Object.fromEntries(accounts.map(a=>[a.id,a]));
-          for(const orig of linksToCreate){
-            const imp=(fresh.imports||[]).find(i=>i.hash===orig.hash);
-            if(!imp)continue;
-            const acc=accById[imp.accountId];
-            try{
-              await api(cfg.scriptUrl,"linkExpense",{
-                expenseId:orig._autoLinkExpenseId,
-                importId:imp.id,
-                accountName:acc?.name||""
-              });
-            }catch{}
-          }
-          await syncDown();
+        const accById=Object.fromEntries(accounts.map(a=>[a.id,a]));
+        for(const orig of linksToCreate){
+          const imp=imports.find(i=>i.hash===orig.hash)||linksToCreate.find(i=>i.hash===orig.hash);
+          if(!imp?.id)continue;
+          const acc=accById[imp.accountId];
+          try{await sbLinkExpense(orig._autoLinkExpenseId,imp.id,acc?.name||"");}catch{}
         }
+        await syncDown();
       }
-      
+
       const linked=linksToCreate.length;
       const msg=linked>0?` (${linked} vinculadas automaticamente)`:"";
       toast_(`✅ ${r.added||0} importadas${msg}`);
       return r;
     }catch(err){toast_("⚠️ "+err.message,"err");return null;}
   };
+
   const updateImport=async(id,updates)=>{
     setImports(p=>p.map(i=>i.id===id?{...i,...updates}:i));
-    try{await api(cfg.scriptUrl,"updateImport",{id,updates});}catch(err){toast_("⚠️ Erro: "+err.message,"err");}
+    try{await sbUpdateImport(id,updates);}catch(err){toast_("⚠️ Erro: "+err.message,"err");}
   };
   const deleteImportFn=async(id)=>{
     setImports(p=>p.filter(i=>i.id!==id));
-    try{await api(cfg.scriptUrl,"deleteImport",{id});}catch{}
+    try{await sbDeleteImport(id);}catch{}
   };
+
   const launchImports=(ids)=>{
     const payerByAccount={};
     const accountNameById={};
     accounts.forEach(a=>{payerByAccount[a.id]=a.payer;accountNameById[a.id]=a.name;});
-    
-    // Atualização otimista: cria despesas localmente na hora
+
     const now=new Date().toISOString();
     const newExpenses=[];
     const idsSet=new Set(ids);
@@ -3594,48 +3676,32 @@ function App(){
         importId:imp.id,reviewed:true,at:now,items:[]
       });
     });
-    
+
     if(newExpenses.length===0)return;
-    
-    // Marca como em trânsito (syncDown ignora esses)
+
     ids.forEach(id=>inFlightImportsRef.current.add(id));
-    
-    // UI atualiza imediatamente (sem espera)
     setExpenses(p=>[...newExpenses,...p]);
     setImports(p=>p.map(i=>idsSet.has(i.id)?{...i,status:"lancada"}:i));
     toast_(`✅ ${newExpenses.length} lançada(s)`);
-    
-    // API em background — após confirmar, libera do set após delay
-    api(cfg.scriptUrl,"launchImports",{ids,payerByAccount,accountNameById})
-      .then(()=>{
-        // Espera 8s antes de liberar (suficiente pra qualquer syncDown em curso terminar)
-        setTimeout(()=>{
-          ids.forEach(id=>inFlightImportsRef.current.delete(id));
-        },8000);
-      })
+
+    // Salva no Supabase em background
+    sbLaunchImports(ids,newExpenses)
+      .then(()=>{setTimeout(()=>{ids.forEach(id=>inFlightImportsRef.current.delete(id));},8000);})
       .catch(err=>{
         ids.forEach(id=>inFlightImportsRef.current.delete(id));
-        toast_("⚠️ Erro ao salvar: "+err.message+" (use 🔄 para sincronizar)","err");
+        toast_("⚠️ Erro ao salvar: "+err.message,"err");
       });
   };
-  
+
   const deleteSessionFn=async(sessionId,alsoDeleteExpenses)=>{
     try{
-      const r=await api(cfg.scriptUrl,"deleteImportSession",{sessionId,alsoDeleteExpenses});
-      if(!r.ok)throw new Error(r.error||"Falha");
+      await sbDeleteImportSession(sessionId,alsoDeleteExpenses);
       await syncDown();
-      const msg=alsoDeleteExpenses?
-        `✅ ${r.importsDeleted} importações + ${r.expensesDeleted} despesas apagadas`:
-        `✅ ${r.importsDeleted} importações apagadas`;
-      toast_(msg);
-    }catch(err){
-      toast_("⚠️ "+err.message,"err");
-    }
+      toast_(alsoDeleteExpenses?"✅ Sessão e despesas apagadas":"✅ Sessão apagada");
+    }catch(err){toast_("⚠️ "+err.message,"err");}
   };
 
-  if(!cfg.scriptUrl)return React.createElement(React.Fragment,null,toast&&React.createElement(Toast,{t:toast}),React.createElement(SetupView,{toast_,onSave:url=>setCfg({scriptUrl:url})}));
-  
-  // Toast slot fixo, sempre presente, fora dos routes
+  // Setup ainda usa scriptUrl para mostrar a tela de configuração
   const toastSlot=React.createElement("div",{key:"toast-slot",style:{position:"fixed",top:0,left:0,right:0,zIndex:9999,pointerEvents:"none"}},toast&&React.createElement(Toast,{t:toast}));
 
   if(view==="localfiles")return React.createElement(React.Fragment,null,toastSlot,React.createElement(LocalFileProcessor,{files:localFiles,payers,lmap,cats,apiKey,imports,accounts,matchPenalties,onSave:saveExpense,onSaveLinked:saveLinkedExpense,onFinish:()=>{setView("home");toast_("✅ Concluído!");},toast_}));
