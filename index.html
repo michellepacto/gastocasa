@@ -2037,11 +2037,11 @@ function LocalFileProcessor({files,payers,lmap,cats,apiKey,imports,accounts,matc
 // ─── BULK UPLOAD PROCESSOR ─────────────────────────────────
 // Processa TODOS os arquivos da pasta Drive automaticamente, sem revisão por arquivo.
 // Cada despesa é lançada com flag reviewed=false, mostrando ícone ! no histórico.
-function BulkUploadProcessor({uploads,payers,lmap,cats,apiKey,scriptUrl,imports,accounts,matchPenalties,onSaveBulk,onDeleteUpload,onFinish,toast_}){
+function BulkUploadProcessor({uploads,expensesAll,payers,lmap,cats,apiKey,scriptUrl,imports,accounts,matchPenalties,onSaveBulk,onDeleteUpload,onMoveToErrors,onFinish,toast_}){
   const [idx,setIdx]=useState(0);
   const [stage,setStage]=useState("starting");
   const [currentFile,setCurrentFile]=useState(null);
-  const [stats,setStats]=useState({success:0,linked:0,failed:0});
+  const [stats,setStats]=useState({success:0,linked:0,failed:0,skipped:0});
   const [log,setLog]=useState([]);
   const cancelRef=useRef(false);
   
@@ -2057,8 +2057,13 @@ function BulkUploadProcessor({uploads,payers,lmap,cats,apiKey,scriptUrl,imports,
   
   const processAll=async()=>{
     setStage("processing");
-    let successCount=0,linkedCount=0,failedCount=0;
+    let successCount=0,linkedCount=0,failedCount=0,skippedCount=0;
     let consecutiveFailures=0;
+    
+    // Mecanismo 1: deduplicação por DriveFileID
+    // Coleta IDs de arquivos já processados antes
+    const usedFileIds=new Set();
+    (expensesAll||[]).forEach(e=>{if(e.driveFileId)usedFileIds.add(e.driveFileId);});
     
     for(let i=0;i<uploads.length;i++){
       if(cancelRef.current)break;
@@ -2072,6 +2077,15 @@ function BulkUploadProcessor({uploads,payers,lmap,cats,apiKey,scriptUrl,imports,
       const upload=uploads[i];
       setIdx(i);
       setCurrentFile(upload);
+      
+      // Mecanismo 1: pula se já processou
+      if(usedFileIds.has(upload.id)){
+        skippedCount++;
+        addLog(`⏭ ${i+1}. ${upload.name?.slice(0,30)||"?"}: já processado antes`,"warn");
+        // Apaga do Drive (já está no Sheets)
+        try{await onDeleteUpload(upload.id);}catch{}
+        continue;
+      }
       
       try{
         // 1. Baixa arquivo do Drive
@@ -2127,7 +2141,8 @@ function BulkUploadProcessor({uploads,payers,lmap,cats,apiKey,scriptUrl,imports,
           mimeType:finalMime,
           account:accountName,
           importId,
-          reviewed:false
+          reviewed:false,
+          driveFileId:upload.id // Mecanismo 1: dedup
         };
         
         const saved=await onSaveBulk(expense,importId);
@@ -2138,7 +2153,7 @@ function BulkUploadProcessor({uploads,payers,lmap,cats,apiKey,scriptUrl,imports,
         if(importId)linkedCount++;
         const linkTag=importId?" 🔗":"";
         addLog(`✅ ${i+1}. ${merchant.slice(0,25)} · ${brl(v)}${linkTag}`);
-        setStats({success:successCount,linked:linkedCount,failed:failedCount});
+        setStats({success:successCount,linked:linkedCount,failed:failedCount,skipped:skippedCount});
         
         // 6. Apaga do Drive
         try{await onDeleteUpload(upload.id);}catch{}
@@ -2151,8 +2166,20 @@ function BulkUploadProcessor({uploads,payers,lmap,cats,apiKey,scriptUrl,imports,
       }catch(err){
         failedCount++;
         consecutiveFailures++;
-        addLog(`❌ ${i+1}. ${upload.name?.slice(0,25)||"?"}: ${err.message.slice(0,40)}`,"err");
-        setStats({success:successCount,linked:linkedCount,failed:failedCount});
+        const msg=err.message||"erro desconhecido";
+        addLog(`❌ ${i+1}. ${upload.name?.slice(0,25)||"?"}: ${msg.slice(0,40)}`,"err");
+        setStats({success:successCount,linked:linkedCount,failed:failedCount,skipped:skippedCount});
+        
+        // Mecanismo 2: se é erro do Drive (DRM, formato, etc), move pra pasta erros/
+        // Detecta por keywords típicos
+        const isDriveError=msg.toLowerCase().includes("drive")||msg.toLowerCase().includes("formato")||msg.toLowerCase().includes("grande demais")||msg.toLowerCase().includes("não foi possível ler");
+        if(isDriveError&&onMoveToErrors){
+          try{
+            await onMoveToErrors(upload.id);
+            addLog(`📁 Movido para pasta upload/erros/ — não tentará de novo`,"warn");
+          }catch{}
+        }
+        
         // Backoff progressivo: 5s, 15s, 30s entre falhas seguidas
         if(i+1<uploads.length&&!cancelRef.current){
           const backoff=consecutiveFailures===1?5:consecutiveFailures===2?15:30;
@@ -2186,6 +2213,7 @@ function BulkUploadProcessor({uploads,payers,lmap,cats,apiKey,scriptUrl,imports,
           React.createElement("div",{style:{fontSize:56,marginBottom:8}},stats.failed===0?"🎉":"✅"),
           React.createElement("div",{style:{fontSize:22,fontWeight:700,marginBottom:4,color:"#1a3a2a"}},stats.success+" lançada"+(stats.success!==1?"s":"")),
           stats.linked>0&&React.createElement("div",{style:{fontSize:13,color:"#16a34a",marginBottom:4}},`🔗 ${stats.linked} vinculada${stats.linked!==1?"s":""} a lançamentos bancários`),
+          stats.skipped>0&&React.createElement("div",{style:{fontSize:13,color:"#6b7280",marginBottom:4}},`⏭ ${stats.skipped} já processada${stats.skipped!==1?"s":""} antes (puladas)`),
           stats.failed>0&&React.createElement("div",{style:{fontSize:13,color:"#dc2626"}},`❌ ${stats.failed} falharam (continuam na pasta upload)`)
         )
       ),
@@ -2219,6 +2247,7 @@ function BulkUploadProcessor({uploads,payers,lmap,cats,apiKey,scriptUrl,imports,
         React.createElement("div",{style:{display:"flex",gap:14,marginTop:14,fontSize:11}},
           React.createElement("div",{style:{color:"#16a34a",fontWeight:700}},`✅ ${stats.success}`),
           stats.linked>0&&React.createElement("div",{style:{color:"#16a34a",fontWeight:700}},`🔗 ${stats.linked}`),
+          stats.skipped>0&&React.createElement("div",{style:{color:"#6b7280",fontWeight:700}},`⏭ ${stats.skipped}`),
           stats.failed>0&&React.createElement("div",{style:{color:"#dc2626",fontWeight:700}},`❌ ${stats.failed}`)
         )
       ),
@@ -2481,7 +2510,7 @@ function CategoryEditor({apiKey,cats,onAdd,onCancel,toast_}){
   );
 }
 
-function SettingsView({payers,cfg,lmap,cats,apiKey,setApiKey,uploadFolderUrl,onAddPayer,onDeletePayer,onChangeUrl,onDeleteLearning,onAddCategory,onDeleteCategory,onBack,toast_,onRefresh,syncing}){
+function SettingsView({payers,cfg,lmap,cats,apiKey,setApiKey,uploadFolderUrl,onAddPayer,onDeletePayer,onChangeUrl,onDeleteLearning,onAddCategory,onDeleteCategory,onResetData,onCleanupDuplicates,onBack,toast_,onRefresh,syncing}){
   const [newPayer,setNewPayer]=useState("");const [url,setUrl]=useState(cfg.scriptUrl||"");
   const [keyInput,setKeyInput]=useState(apiKey||"");const [showKey,setShowKey]=useState(false);
   const [editingCategory,setEditingCategory]=useState(false);
@@ -2525,6 +2554,24 @@ function SettingsView({payers,cfg,lmap,cats,apiKey,setApiKey,uploadFolderUrl,onA
           React.createElement("div",{style:{flex:1,minWidth:0}},React.createElement("div",{style:{fontSize:13,fontWeight:600,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}},m),React.createElement("div",{style:{fontSize:11,color:"#6b7280"}},`${getCat(cats,c).i} ${c}`)),
           React.createElement("button",{onClick:()=>onDeleteLearning(m),style:{background:"none",border:"none",fontSize:16,padding:4}},"🗑️")
         )))
+      ),
+      React.createElement(Card,{title:"🧹 Limpar duplicatas"},
+        React.createElement("div",{style:{fontSize:12,color:"#6b7280",marginBottom:12,lineHeight:1.5}},
+          "Detecta despesas com ",React.createElement("b",null,"mesmo estabelecimento + data + valor")," e mostra para você confirmar a limpeza.",
+          React.createElement("br"),
+          "A primeira (mais antiga) é mantida; as duplicatas são apagadas."
+        ),
+        React.createElement("button",{onClick:onCleanupDuplicates,style:{width:"100%",padding:12,borderRadius:12,background:"#f59e0b",color:"#fff",border:"none",fontWeight:700,fontSize:14}},"🔍 Procurar duplicatas")
+      ),
+      React.createElement(Card,{title:"⚠️ Zona de perigo"},
+        React.createElement("div",{style:{fontSize:12,color:"#6b7280",marginBottom:12,lineHeight:1.5}},
+          "Apaga ",React.createElement("b",null,"todas")," as despesas, importações pendentes e aprendizado de vínculos.",
+          React.createElement("br"),
+          "Mantém: pessoas, categorias, contas e aprendizado de categorias.",
+          React.createElement("br"),
+          React.createElement("b",null,"Esta ação não pode ser desfeita.")
+        ),
+        React.createElement("button",{onClick:onResetData,style:{width:"100%",padding:12,borderRadius:12,background:"#dc2626",color:"#fff",border:"none",fontWeight:700,fontSize:14}},"🗑️ Resetar todas as despesas e importações")
       ),
       React.createElement(Card,{title:"🔗 Alterar URL"},
         React.createElement(InputEl,{value:url,onChange:setUrl}),
@@ -2698,6 +2745,88 @@ function App(){
   const addCategory=async(cat)=>{setCats(p=>[...p,cat]);try{await api(cfg.scriptUrl,"addCategory",{category:cat});toast_("✅ Categoria criada!");}catch(err){toast_("⚠️ Local","err");}};
   const deleteCategory=async(name)=>{setCats(p=>p.filter(c=>c.n!==name));try{await api(cfg.scriptUrl,"deleteCategory",{name});toast_("✅ Removida");}catch{}};
   const changeUrl=(newUrl)=>{if(!newUrl?.trim())return;setCfg({scriptUrl:newUrl.trim()});setExpenses([]);setLmap({});setPayers(["Eu"]);setCats(DEFAULT_CATS);setAccounts([]);setImports([]);setMatchPenalties({});toast_("🔄 URL atualizada!");};
+  
+  const resetDataFn=async()=>{
+    if(!confirm("⚠️ ATENÇÃO\n\nIsso vai apagar:\n• TODAS as despesas\n• TODAS as importações pendentes\n• Aprendizado de vínculos bancários\n\nMantém: pessoas, categorias, contas e aprendizado de categorias.\n\nEsta ação NÃO pode ser desfeita.\n\nTem certeza?"))return;
+    if(!confirm("Última confirmação: tem certeza absoluta?"))return;
+    try{
+      const r=await api(cfg.scriptUrl,"resetData");
+      if(!r.ok)throw new Error(r.error||"Falha");
+      setExpenses([]);
+      setImports([]);
+      setMatchPenalties({});
+      const d=r.deleted||{};
+      toast_(`✅ Apagados: ${d.gastos||0} despesas, ${d.importacoes||0} importações, ${d.matchAprendizado||0} aprendizados`);
+    }catch(err){
+      toast_("⚠️ "+err.message,"err");
+    }
+  };
+  
+  // Mecanismo 2: move arquivo para upload/erros/
+  const moveToErrorsFn=async(fileId)=>{
+    if(!fileId)return;
+    try{
+      await api(cfg.scriptUrl,"moveToErrors",{id:fileId});
+    }catch(err){
+      console.error("moveToErrors falhou:",err);
+    }
+  };
+  
+  // Mecanismo 3: detecta e remove duplicatas
+  const cleanupDuplicatesFn=async()=>{
+    // Agrupa por chave: estabelecimento + data + valor
+    const norm=s=>(s||"").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"").trim();
+    const groups={};
+    for(const exp of expenses){
+      const key=`${norm(exp.merchant)}|${exp.date}|${(+exp.total||0).toFixed(2)}`;
+      if(!groups[key])groups[key]=[];
+      groups[key].push(exp);
+    }
+    
+    // Pega só grupos com 2+ duplicatas
+    const dupGroups=Object.values(groups).filter(g=>g.length>1);
+    
+    if(dupGroups.length===0){
+      toast_("✅ Nenhuma duplicata encontrada");
+      return;
+    }
+    
+    // Calcula totais
+    const totalDupExpenses=dupGroups.reduce((s,g)=>s+g.length,0);
+    const toDelete=totalDupExpenses-dupGroups.length; // mantém 1 de cada grupo
+    
+    // Constrói preview
+    let preview=`Encontradas ${dupGroups.length} grupos de duplicatas (${totalDupExpenses} despesas no total).\n\n`;
+    preview+=`Vou MANTER a mais antiga de cada grupo e APAGAR as outras (${toDelete} despesas).\n\n`;
+    preview+=`Exemplos (mostrando até 5 grupos):\n`;
+    dupGroups.slice(0,5).forEach((g,i)=>{
+      const e=g[0];
+      preview+=`\n${i+1}. ${e.merchant} · ${dtBR(e.date)} · ${brl(e.total)} → ${g.length} cópias`;
+    });
+    if(dupGroups.length>5)preview+=`\n... e mais ${dupGroups.length-5} grupos`;
+    preview+=`\n\nProsseguir?`;
+    
+    if(!confirm(preview))return;
+    
+    // Decide quais apagar (mantém o de menor 'at' = mais antigo)
+    const idsToDelete=[];
+    dupGroups.forEach(group=>{
+      const sorted=[...group].sort((a,b)=>(a.at||"").localeCompare(b.at||""));
+      // Pula o primeiro (mantém), apaga os demais
+      sorted.slice(1).forEach(e=>idsToDelete.push(e.id));
+    });
+    
+    try{
+      const r=await api(cfg.scriptUrl,"bulkDelete",{ids:idsToDelete});
+      if(!r.ok)throw new Error(r.error||"Falha");
+      // Atualiza estado local
+      const idSet=new Set(idsToDelete);
+      setExpenses(p=>p.filter(e=>!idSet.has(e.id)));
+      toast_(`✅ ${r.deleted||idsToDelete.length} duplicatas removidas`);
+    }catch(err){
+      toast_("⚠️ "+err.message,"err");
+    }
+  };
 
   // ─── ACCOUNTS / IMPORTS ─────────────────────────────
   const addAccount=async(acc)=>{
@@ -2781,12 +2910,12 @@ function App(){
 
   if(view==="localfiles")return React.createElement(RouteWrap,null,React.createElement(LocalFileProcessor,{files:localFiles,payers,lmap,cats,apiKey,imports,accounts,matchPenalties,onSave:saveExpense,onSaveLinked:saveLinkedExpense,onFinish:()=>{setView("home");toast_("✅ Concluído!");},toast_}));
   if(view==="capture")return React.createElement(RouteWrap,null,React.createElement(CaptureView,{payers,lmap,cats,apiKey,imports,accounts,matchPenalties,onSave:saveAndReturnHome,onSaveLinked:saveLinkedAndReturnHome,onBack:()=>setView("home"),toast_}));
-  if(view==="upload")return React.createElement(RouteWrap,null,React.createElement(BulkUploadProcessor,{uploads:pendingUploads,payers,lmap,cats,apiKey,scriptUrl:cfg.scriptUrl,imports,accounts,matchPenalties,onSaveBulk:saveBulkExpense,onDeleteUpload:deleteUploadFile,onFinish:()=>{checkUploads();syncDown();setView("history");},toast_}));
+  if(view==="upload")return React.createElement(RouteWrap,null,React.createElement(BulkUploadProcessor,{uploads:pendingUploads,expensesAll:expenses,payers,lmap,cats,apiKey,scriptUrl:cfg.scriptUrl,imports,accounts,matchPenalties,onSaveBulk:saveBulkExpense,onDeleteUpload:deleteUploadFile,onMoveToErrors:moveToErrorsFn,onFinish:()=>{checkUploads();syncDown();setView("history");},toast_}));
   if(view==="history")return React.createElement(RouteWrap,null,React.createElement(HistoryView,{expenses,cats,accounts,onBack:()=>setView("home"),onDelete:deleteExpense,onUnlink:unlinkExpenseFn,onEdit:e=>{setEditingExpense(e);setView("editExpense");}}));
   if(view==="editExpense"&&editingExpense)return React.createElement(RouteWrap,null,React.createElement(EditExpenseView,{expense:editingExpense,imports,accounts,payers,cats,matchPenalties,onSave:updateExpenseFn,onUnlink:unlinkExpenseFn,onLink:linkExpenseFn,onBack:()=>{setEditingExpense(null);setView("history");},toast_}));
   if(view==="dashboard")return React.createElement(RouteWrap,null,React.createElement(DashboardView,{expenses,cats,payers,accounts,onBack:()=>setView("home")}));
   if(view==="import")return React.createElement(RouteWrap,null,React.createElement(ImportView,{accounts,imports,expenses,cats,payers,lmap,scriptUrl:cfg.scriptUrl,onAddAccount:addAccount,onDeleteAccount:deleteAccountFn,onUploadCsv:uploadCsv,onUpdateImport:updateImport,onDeleteImport:deleteImportFn,onLaunchImports:launchImports,onBack:()=>setView("home"),toast_}));
-  if(view==="settings")return React.createElement(RouteWrap,null,React.createElement(SettingsView,{payers,cfg,lmap,cats,apiKey,setApiKey,uploadFolderUrl,onAddPayer:addPayer,onDeletePayer:deletePayer,onChangeUrl:changeUrl,onDeleteLearning:deleteLearning,onAddCategory:addCategory,onDeleteCategory:deleteCategory,onBack:()=>setView("home"),toast_,onRefresh:syncDown,syncing}));
+  if(view==="settings")return React.createElement(RouteWrap,null,React.createElement(SettingsView,{payers,cfg,lmap,cats,apiKey,setApiKey,uploadFolderUrl,onAddPayer:addPayer,onDeletePayer:deletePayer,onChangeUrl:changeUrl,onDeleteLearning:deleteLearning,onAddCategory:addCategory,onDeleteCategory:deleteCategory,onResetData:resetDataFn,onCleanupDuplicates:cleanupDuplicatesFn,onBack:()=>setView("home"),toast_,onRefresh:syncDown,syncing}));
 
   // HOME
   const now=new Date();
