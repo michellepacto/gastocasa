@@ -2465,7 +2465,7 @@ function HistoryView({expenses,cats,accounts,onBack,onDelete,onUnlink,onEdit}){
 }
 
 // ─── EDIT EXPENSE VIEW ────────────────────────────────────
-function EditExpenseView({expense,imports,accounts,payers,cats,matchPenalties,onSave,onUnlink,onLink,onBack,toast_}){
+function EditExpenseView({expense,imports,accounts,payers,cats,matchPenalties,allExpenses,onSave,onUnlink,onLink,onBulkUpdateCategory,onBack,toast_}){
   const [merchant,setMerchant]=useState(expense.merchant||"");
   const [total,setTotal]=useState(String(expense.total||""));
   const [date,setDate]=useState(expense.date||today());
@@ -2506,6 +2506,25 @@ function EditExpenseView({expense,imports,accounts,payers,cats,matchPenalties,on
     await onSave(expense.id,{
       merchant:merchant.trim(),total:v,date,category,payer,splitWith,reviewed:true
     });
+    
+    // Se mudou a categoria, oferece atualizar outros do mesmo fornecedor
+    const categoryChanged=category!==expense.category;
+    if(categoryChanged&&onBulkUpdateCategory){
+      const normName=s=>(s||"").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/\b(ltda|me|eireli|sa|s\/a|epp|mei|comercio|comercial|loja|restaurante|mercado)\b/g,"").replace(/[^a-z0-9 ]/g," ").replace(/\s+/g," ").trim();
+      const norm=normName(merchant);
+      const others=(allExpenses||[]).filter(e=>
+        e.id!==expense.id&&
+        normName(e.merchant)===norm&&
+        e.category!==category
+      );
+      if(others.length>0){
+        const confirmed=confirm(`Você alterou a categoria de "${merchant.trim()}"\nde ${expense.category} → ${category}\n\nEncontrei mais ${others.length} lançamento(s) do mesmo fornecedor com categoria diferente.\n\nDeseja atualizar todos para "${category}"?`);
+        if(confirmed){
+          await onBulkUpdateCategory(others.map(e=>e.id),category);
+        }
+      }
+    }
+    
     onBack();
   };
   
@@ -2924,6 +2943,19 @@ function App(){
   const deleteCategory=async(name)=>{setCats(p=>p.filter(c=>c.n!==name));try{await api(cfg.scriptUrl,"deleteCategory",{name});toast_("✅ Removida");}catch{}};
   const changeUrl=(newUrl)=>{if(!newUrl?.trim())return;setCfg({scriptUrl:newUrl.trim()});setExpenses([]);setLmap({});setPayers(["Eu"]);setCats(DEFAULT_CATS);setAccounts([]);setImports([]);setMatchPenalties({});toast_("🔄 URL atualizada!");};
   
+  const bulkUpdateCategoryFn=async(ids,category)=>{
+    if(!ids||ids.length===0)return;
+    setExpenses(p=>p.map(e=>ids.includes(e.id)?{...e,category}:e));
+    let updated=0;
+    for(const id of ids){
+      try{
+        await api(cfg.scriptUrl,"updateExpense",{id,updates:{category}});
+        updated++;
+      }catch{}
+    }
+    toast_(`✅ ${updated} lançamento(s) atualizados para "${category}"`);
+  };
+  
   const resetDataFn=async()=>{
     if(!confirm("⚠️ ATENÇÃO\n\nIsso vai apagar:\n• TODAS as despesas\n• TODAS as importações pendentes\n• Aprendizado de vínculos bancários\n\nMantém: pessoas, categorias, contas e aprendizado de categorias.\n\nEsta ação NÃO pode ser desfeita.\n\nTem certeza?"))return;
     if(!confirm("Última confirmação: tem certeza absoluta?"))return;
@@ -3146,7 +3178,7 @@ function App(){
   if(view==="capture")return React.createElement(React.Fragment,null,toastSlot,React.createElement(CaptureView,{payers,lmap,cats,apiKey,imports,accounts,matchPenalties,onSave:saveAndReturnHome,onSaveLinked:saveLinkedAndReturnHome,onBack:()=>setView("home"),toast_}));
   if(view==="upload")return React.createElement(React.Fragment,null,toastSlot,React.createElement(BulkUploadProcessor,{key:"bulk-uploader",uploads:pendingUploads,expensesAll:expenses,payers,lmap,cats,apiKey,scriptUrl:cfg.scriptUrl,imports,accounts,matchPenalties,onSaveBulk:saveBulkExpense,onDeleteUpload:deleteUploadFile,onMoveToErrors:moveToErrorsFn,onFinish:()=>{checkUploads();syncDown();setView("history");},toast_}));
   if(view==="history")return React.createElement(React.Fragment,null,toastSlot,React.createElement(HistoryView,{expenses,cats,accounts,onBack:()=>setView("home"),onDelete:deleteExpense,onUnlink:unlinkExpenseFn,onEdit:e=>{setEditingExpense(e);setView("editExpense");}}));
-  if(view==="editExpense"&&editingExpense)return React.createElement(React.Fragment,null,toastSlot,React.createElement(EditExpenseView,{expense:editingExpense,imports,accounts,payers,cats,matchPenalties,onSave:updateExpenseFn,onUnlink:unlinkExpenseFn,onLink:linkExpenseFn,onBack:()=>{setEditingExpense(null);setView("history");},toast_}));
+  if(view==="editExpense"&&editingExpense)return React.createElement(React.Fragment,null,toastSlot,React.createElement(EditExpenseView,{expense:editingExpense,imports,accounts,payers,cats,matchPenalties,allExpenses:expenses,onSave:updateExpenseFn,onUnlink:unlinkExpenseFn,onLink:linkExpenseFn,onBulkUpdateCategory:bulkUpdateCategoryFn,onBack:()=>{setEditingExpense(null);setView("history");},toast_}));
   if(view==="dashboard")return React.createElement(React.Fragment,null,toastSlot,React.createElement(DashboardView,{expenses,cats,payers,accounts,onBack:()=>setView("home")}));
   if(view==="import")return React.createElement(React.Fragment,null,toastSlot,React.createElement(ImportView,{accounts,imports,expenses,cats,payers,lmap,scriptUrl:cfg.scriptUrl,onAddAccount:addAccount,onDeleteAccount:deleteAccountFn,onUploadCsv:uploadCsv,onUpdateImport:updateImport,onDeleteImport:deleteImportFn,onLaunchImports:launchImports,onDeleteSession:deleteSessionFn,onBack:()=>setView("home"),toast_}));
   if(view==="settings")return React.createElement(React.Fragment,null,toastSlot,React.createElement(SettingsView,{payers,cfg,lmap,cats,apiKey,setApiKey,uploadFolderUrl,onAddPayer:addPayer,onDeletePayer:deletePayer,onChangeUrl:changeUrl,onDeleteLearning:deleteLearning,onAddCategory:addCategory,onDeleteCategory:deleteCategory,onResetData:resetDataFn,onCleanupDuplicates:cleanupDuplicatesFn,onFixPayers:fixPayersFn,onBack:()=>setView("home"),toast_,onRefresh:syncDown,syncing}));
