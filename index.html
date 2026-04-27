@@ -581,9 +581,38 @@ async function migrateSheetsToSupabase(scriptUrl, onProgress) {
   const supa = sb();
   const stats = { expenses: 0, imports: 0, payers: 0, categories: 0, accounts: 0, learning: 0, penalties: 0, errors: [] };
   
+  // Helper: normaliza data para YYYY-MM-DD ou null
+  const normDate = (d) => {
+    if (!d) return null;
+    if (typeof d === "string") {
+      // Já é YYYY-MM-DD?
+      if (/^\d{4}-\d{2}-\d{2}/.test(d)) return d.slice(0, 10);
+      // Tenta parse
+      try {
+        const parsed = new Date(d);
+        if (isNaN(parsed.getTime())) return null;
+        return parsed.toISOString().slice(0, 10);
+      } catch { return null; }
+    }
+    if (d instanceof Date) {
+      if (isNaN(d.getTime())) return null;
+      return d.toISOString().slice(0, 10);
+    }
+    return null;
+  };
+  
+  // Helper: extrai nome de categoria de qualquer formato
+  const catName = (c) => {
+    if (!c) return null;
+    if (typeof c === "string") return c.trim() || null;
+    return (c.name || c.label || c.nome || "").trim() || null;
+  };
+  
   // ─── PAGADORES ─────────────────────────────────────────────────────
   log(`👥 Migrando ${payers.length} pessoas...`);
-  for (const name of payers) {
+  for (const p of payers) {
+    const name = typeof p === "string" ? p.trim() : (p?.name || "").trim();
+    if (!name) { stats.errors.push(`payer vazio`); continue; }
     const { error } = await supa.from("payers").upsert({ name }, { onConflict: "name" });
     if (error) stats.errors.push(`payer ${name}: ${error.message}`);
     else stats.payers++;
@@ -591,9 +620,12 @@ async function migrateSheetsToSupabase(scriptUrl, onProgress) {
   
   // ─── CATEGORIAS ────────────────────────────────────────────────────
   log(`🏷️ Migrando ${categories.length} categorias...`);
+  // Debug: mostra primeira categoria para ver formato real
+  if (categories.length > 0) log(`   formato detectado: ${JSON.stringify(categories[0]).slice(0,80)}`);
   for (const c of categories) {
-    const name = typeof c === "string" ? c : c.name;
-    const emoji = typeof c === "string" ? "" : (c.emoji || "");
+    const name = catName(c);
+    if (!name) { stats.errors.push(`categoria sem nome: ${JSON.stringify(c).slice(0,60)}`); continue; }
+    const emoji = (typeof c === "object" && c) ? (c.emoji || c.icon || "") : "";
     const { error } = await supa.from("categories").upsert({ name, emoji }, { onConflict: "name" });
     if (error) stats.errors.push(`category ${name}: ${error.message}`);
     else stats.categories++;
@@ -602,8 +634,9 @@ async function migrateSheetsToSupabase(scriptUrl, onProgress) {
   // ─── CONTAS ────────────────────────────────────────────────────────
   log(`🏦 Migrando ${accounts.length} contas...`);
   for (const a of accounts) {
+    if (!a?.id || !a?.name) { stats.errors.push(`conta inválida: ${JSON.stringify(a).slice(0,60)}`); continue; }
     const { error } = await supa.from("accounts").upsert({
-      id: a.id, name: a.name, payer: a.payer, color: a.color || null
+      id: String(a.id), name: String(a.name), payer: String(a.payer || ""), color: a.color || null
     }, { onConflict: "id" });
     if (error) stats.errors.push(`account ${a.name}: ${error.message}`);
     else stats.accounts++;
@@ -612,16 +645,35 @@ async function migrateSheetsToSupabase(scriptUrl, onProgress) {
   // ─── APRENDIZADO ───────────────────────────────────────────────────
   const learningEntries = Object.entries(learning);
   log(`🧠 Migrando ${learningEntries.length} aprendizados...`);
-  const learningRows = learningEntries.map(([merchant, category]) => ({
-    merchant_key: merchant.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim(),
-    merchant,
-    category: typeof category === "string" ? category : (category.category || "Outros"),
-    count: typeof category === "object" ? (category.count || 1) : 1
-  }));
+  if (learningEntries.length > 0) log(`   formato: chave="${learningEntries[0][0].slice(0,30)}" valor=${JSON.stringify(learningEntries[0][1]).slice(0,60)}`);
+  
+  const learningRows = [];
+  for (const [merchant, val] of learningEntries) {
+    const merchantName = String(merchant || "").trim();
+    if (!merchantName) continue;
+    const cat = typeof val === "string" ? val : (val?.category || val?.cat || "");
+    if (!cat) continue;
+    learningRows.push({
+      merchant_key: merchantName.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim(),
+      merchant: merchantName,
+      category: cat,
+      count: typeof val === "object" && val?.count ? Number(val.count) : 1
+    });
+  }
   if (learningRows.length > 0) {
+    // upsert em batch
     const { error } = await supa.from("learning").upsert(learningRows, { onConflict: "merchant_key" });
-    if (error) stats.errors.push(`learning: ${error.message}`);
-    else stats.learning = learningRows.length;
+    if (error) {
+      // Se falhar em batch, tenta um por um
+      log(`   ⚠️ Batch falhou, tentando individualmente...`);
+      for (const row of learningRows) {
+        const { error: e2 } = await supa.from("learning").upsert(row, { onConflict: "merchant_key" });
+        if (e2) stats.errors.push(`learning ${row.merchant}: ${e2.message}`);
+        else stats.learning++;
+      }
+    } else {
+      stats.learning = learningRows.length;
+    }
   }
   
   // ─── PENALIDADES ───────────────────────────────────────────────────
@@ -634,59 +686,80 @@ async function migrateSheetsToSupabase(scriptUrl, onProgress) {
     else stats.penalties = penaltyRows.length;
   }
   
-  // ─── DESPESAS (em batches de 500) ──────────────────────────────────
+  // ─── DESPESAS (em batches de 200, com fallback individual) ─────────
   log(`💰 Migrando ${expenses.length} despesas...`);
-  const expBatches = chunkArray(expenses, 500);
-  for (let i = 0; i < expBatches.length; i++) {
-    const batch = expBatches[i].map(e => ({
-      id: e.id,
-      date: e.date,
-      merchant: e.merchant || "",
-      category: e.category || null,
-      total: Number(e.total) || 0,
-      payer: e.payer || null,
-      items: Array.isArray(e.items) ? e.items : [],
-      receipt_url: e.receiptUrl || null,
-      split_with: Array.isArray(e.splitWith) ? e.splitWith : (e.payer ? [e.payer] : []),
-      account: e.account || null,
-      import_id: e.importId || null,
-      reviewed: e.reviewed !== false,
-      drive_file_id: e.driveFileId || null,
-      at: e.at || new Date().toISOString()
-    }));
-    const { error } = await supa.from("expenses").upsert(batch, { onConflict: "id" });
-    if (error) stats.errors.push(`expenses batch ${i+1}: ${error.message}`);
-    else stats.expenses += batch.length;
-    log(`  💰 ${stats.expenses}/${expenses.length}`);
-  }
+  await migrateBatchWithRetry(supa, "expenses", expenses, (e) => ({
+    id: String(e.id || ""),
+    date: normDate(e.date) || normDate(e.at) || new Date().toISOString().slice(0,10),
+    merchant: String(e.merchant || "").trim() || "(sem nome)",
+    category: e.category || null,
+    total: Number(e.total) || 0,
+    payer: e.payer || null,
+    items: Array.isArray(e.items) ? e.items : [],
+    receipt_url: e.receiptUrl || null,
+    split_with: Array.isArray(e.splitWith) ? e.splitWith : (e.payer ? [e.payer] : []),
+    account: e.account || null,
+    import_id: e.importId || null,
+    reviewed: e.reviewed !== false,
+    drive_file_id: e.driveFileId || null,
+    at: e.at || new Date().toISOString()
+  }), stats, "expenses", log);
   
-  // ─── IMPORTAÇÕES (em batches de 500) ───────────────────────────────
+  // ─── IMPORTAÇÕES (em batches de 200, com fallback individual) ──────
   log(`💳 Migrando ${imports.length} importações...`);
-  const impBatches = chunkArray(imports, 500);
-  for (let i = 0; i < impBatches.length; i++) {
-    const batch = impBatches[i].map(im => ({
-      id: im.id,
-      account_id: im.accountId || "",
-      date: im.date || null,
-      title: im.title || "",
-      original_amount: im.originalAmount != null ? Number(im.originalAmount) : null,
-      total_amount: Number(im.totalAmount) || 0,
-      status: im.status || "pendente",
-      category: im.category || null,
-      reason: im.reason || null,
-      installment: im.installment || null,
-      hash: im.hash || null,
-      session_id: im.sessionId || null,
-      expense_id: im.expenseId || null
-    }));
-    const { error } = await supa.from("imports").upsert(batch, { onConflict: "id" });
-    if (error) stats.errors.push(`imports batch ${i+1}: ${error.message}`);
-    else stats.imports += batch.length;
-    log(`  💳 ${stats.imports}/${imports.length}`);
-  }
+  await migrateBatchWithRetry(supa, "imports", imports, (im) => ({
+    id: String(im.id || ""),
+    account_id: String(im.accountId || ""),
+    date: normDate(im.date),
+    title: String(im.title || "").trim() || "(sem título)",
+    original_amount: im.originalAmount != null ? Number(im.originalAmount) : null,
+    total_amount: Number(im.totalAmount) || 0,
+    status: im.status || "pendente",
+    category: im.category || null,
+    reason: im.reason || null,
+    installment: im.installment || null,
+    hash: im.hash || null,
+    session_id: im.sessionId || null,
+    expense_id: im.expenseId || null
+  }), stats, "imports", log);
   
-  log(`✅ Migração concluída!`);
+  log(`✅ Migração concluída! ${stats.errors.length} erros`);
   return stats;
+}
+
+// Insere em batches; se um batch falhar, retenta item por item para identificar problemas
+async function migrateBatchWithRetry(supa, table, items, transform, stats, statKey, log) {
+  const BATCH_SIZE = 200;
+  const batches = chunkArray(items, BATCH_SIZE);
+  
+  for (let i = 0; i < batches.length; i++) {
+    const rawBatch = batches[i];
+    const batch = rawBatch.map(transform).filter(x => x.id); // só com id válido
+    
+    if (batch.length === 0) continue;
+    
+    const { error } = await supa.from(table).upsert(batch, { onConflict: "id" });
+    
+    if (!error) {
+      stats[statKey] += batch.length;
+      log(`  ${table === "expenses" ? "💰" : "💳"} ${stats[statKey]}/${items.length}`);
+    } else {
+      // Batch falhou — tenta um por um
+      log(`  ⚠️ Batch ${i+1} falhou (${error.message.slice(0,60)}), tentando individualmente...`);
+      let inBatchOk = 0, inBatchFail = 0;
+      for (const row of batch) {
+        const { error: e2 } = await supa.from(table).upsert(row, { onConflict: "id" });
+        if (e2) {
+          stats.errors.push(`${table} id=${row.id}: ${e2.message.slice(0,80)}`);
+          inBatchFail++;
+        } else {
+          stats[statKey]++;
+          inBatchOk++;
+        }
+      }
+      log(`  ${table === "expenses" ? "💰" : "💳"} ${stats[statKey]}/${items.length} (${inBatchFail} erros nesta batch)`);
+    }
+  }
 }
 
 function chunkArray(arr, size) {
@@ -2993,8 +3066,8 @@ function MigrationCard({cfg,toast_}){
           React.createElement("br"),
           React.createElement("b",{style:{color:"#92400e"}},`${stats.errors.length} erro(s):`),
           React.createElement("ul",{style:{marginTop:4,paddingLeft:16,fontSize:10}},
-            stats.errors.slice(0,5).map((e,i)=>React.createElement("li",{key:i},e)),
-            stats.errors.length>5&&React.createElement("li",null,`...e mais ${stats.errors.length-5}`)
+            stats.errors.slice(0,15).map((e,i)=>React.createElement("li",{key:i},e)),
+            stats.errors.length>15&&React.createElement("li",null,`...e mais ${stats.errors.length-15}`)
           )
         )
       )
