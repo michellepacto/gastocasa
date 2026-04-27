@@ -25,6 +25,7 @@ table { border-spacing: 0; }
 <div id="root"></div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.0/dist/umd/supabase.min.js"></script>
 <script>
 const {useState,useEffect,useRef,useCallback,useMemo} = React;
 
@@ -545,6 +546,160 @@ function parseBradescoCC(text,accountId,payers){
 }
 
 // Hash simples para dedupe
+// ═══════════════════════════════════════════════════════════════════
+// SUPABASE — config + cliente
+// ═══════════════════════════════════════════════════════════════════
+const SUPABASE_URL = "https://obvehcuxdludclwgkwzp.supabase.co";
+const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9idmVoY3V4ZGx1ZGNsd2drd3pwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzczMDYxNTIsImV4cCI6MjA5Mjg4MjE1Mn0.g2lShJdXw-FXERCPCYfcub8--lMv_kkqueZu4ulbR8E";
+
+let _sb = null;
+function sb() {
+  if (_sb) return _sb;
+  if (!window.supabase) throw new Error("Cliente Supabase não carregado");
+  _sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+  return _sb;
+}
+
+// Migração: lê tudo do Sheets via Apps Script e escreve no Supabase
+async function migrateSheetsToSupabase(scriptUrl, onProgress) {
+  const log = (msg) => { console.log("[migrate]", msg); if (onProgress) onProgress(msg); };
+  
+  log("📡 Lendo dados do Sheets...");
+  const r = await callApi(scriptUrl, "getAll");
+  if (!r.ok) throw new Error("Erro ao ler do Sheets: " + (r.error || "desconhecido"));
+  
+  const expenses = r.expenses || [];
+  const imports = r.imports || [];
+  const payers = r.payers || [];
+  const categories = r.categories || [];
+  const accounts = r.accounts || [];
+  const learning = r.learning || {};
+  const matchPenalties = r.matchPenalties || {};
+  
+  log(`📊 ${expenses.length} despesas, ${imports.length} importações, ${accounts.length} contas`);
+  
+  const supa = sb();
+  const stats = { expenses: 0, imports: 0, payers: 0, categories: 0, accounts: 0, learning: 0, penalties: 0, errors: [] };
+  
+  // ─── PAGADORES ─────────────────────────────────────────────────────
+  log(`👥 Migrando ${payers.length} pessoas...`);
+  for (const name of payers) {
+    const { error } = await supa.from("payers").upsert({ name }, { onConflict: "name" });
+    if (error) stats.errors.push(`payer ${name}: ${error.message}`);
+    else stats.payers++;
+  }
+  
+  // ─── CATEGORIAS ────────────────────────────────────────────────────
+  log(`🏷️ Migrando ${categories.length} categorias...`);
+  for (const c of categories) {
+    const name = typeof c === "string" ? c : c.name;
+    const emoji = typeof c === "string" ? "" : (c.emoji || "");
+    const { error } = await supa.from("categories").upsert({ name, emoji }, { onConflict: "name" });
+    if (error) stats.errors.push(`category ${name}: ${error.message}`);
+    else stats.categories++;
+  }
+  
+  // ─── CONTAS ────────────────────────────────────────────────────────
+  log(`🏦 Migrando ${accounts.length} contas...`);
+  for (const a of accounts) {
+    const { error } = await supa.from("accounts").upsert({
+      id: a.id, name: a.name, payer: a.payer, color: a.color || null
+    }, { onConflict: "id" });
+    if (error) stats.errors.push(`account ${a.name}: ${error.message}`);
+    else stats.accounts++;
+  }
+  
+  // ─── APRENDIZADO ───────────────────────────────────────────────────
+  const learningEntries = Object.entries(learning);
+  log(`🧠 Migrando ${learningEntries.length} aprendizados...`);
+  const learningRows = learningEntries.map(([merchant, category]) => ({
+    merchant_key: merchant.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim(),
+    merchant,
+    category: typeof category === "string" ? category : (category.category || "Outros"),
+    count: typeof category === "object" ? (category.count || 1) : 1
+  }));
+  if (learningRows.length > 0) {
+    const { error } = await supa.from("learning").upsert(learningRows, { onConflict: "merchant_key" });
+    if (error) stats.errors.push(`learning: ${error.message}`);
+    else stats.learning = learningRows.length;
+  }
+  
+  // ─── PENALIDADES ───────────────────────────────────────────────────
+  const penaltyEntries = Object.entries(matchPenalties);
+  log(`⚖️ Migrando ${penaltyEntries.length} penalidades...`);
+  const penaltyRows = penaltyEntries.map(([key, penalty]) => ({ key, penalty: Number(penalty) || 0 }));
+  if (penaltyRows.length > 0) {
+    const { error } = await supa.from("match_penalties").upsert(penaltyRows, { onConflict: "key" });
+    if (error) stats.errors.push(`penalties: ${error.message}`);
+    else stats.penalties = penaltyRows.length;
+  }
+  
+  // ─── DESPESAS (em batches de 500) ──────────────────────────────────
+  log(`💰 Migrando ${expenses.length} despesas...`);
+  const expBatches = chunkArray(expenses, 500);
+  for (let i = 0; i < expBatches.length; i++) {
+    const batch = expBatches[i].map(e => ({
+      id: e.id,
+      date: e.date,
+      merchant: e.merchant || "",
+      category: e.category || null,
+      total: Number(e.total) || 0,
+      payer: e.payer || null,
+      items: Array.isArray(e.items) ? e.items : [],
+      receipt_url: e.receiptUrl || null,
+      split_with: Array.isArray(e.splitWith) ? e.splitWith : (e.payer ? [e.payer] : []),
+      account: e.account || null,
+      import_id: e.importId || null,
+      reviewed: e.reviewed !== false,
+      drive_file_id: e.driveFileId || null,
+      at: e.at || new Date().toISOString()
+    }));
+    const { error } = await supa.from("expenses").upsert(batch, { onConflict: "id" });
+    if (error) stats.errors.push(`expenses batch ${i+1}: ${error.message}`);
+    else stats.expenses += batch.length;
+    log(`  💰 ${stats.expenses}/${expenses.length}`);
+  }
+  
+  // ─── IMPORTAÇÕES (em batches de 500) ───────────────────────────────
+  log(`💳 Migrando ${imports.length} importações...`);
+  const impBatches = chunkArray(imports, 500);
+  for (let i = 0; i < impBatches.length; i++) {
+    const batch = impBatches[i].map(im => ({
+      id: im.id,
+      account_id: im.accountId || "",
+      date: im.date || null,
+      title: im.title || "",
+      original_amount: im.originalAmount != null ? Number(im.originalAmount) : null,
+      total_amount: Number(im.totalAmount) || 0,
+      status: im.status || "pendente",
+      category: im.category || null,
+      reason: im.reason || null,
+      installment: im.installment || null,
+      hash: im.hash || null,
+      session_id: im.sessionId || null,
+      expense_id: im.expenseId || null
+    }));
+    const { error } = await supa.from("imports").upsert(batch, { onConflict: "id" });
+    if (error) stats.errors.push(`imports batch ${i+1}: ${error.message}`);
+    else stats.imports += batch.length;
+    log(`  💳 ${stats.imports}/${imports.length}`);
+  }
+  
+  log(`✅ Migração concluída!`);
+  return stats;
+}
+
+function chunkArray(arr, size) {
+  const out = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+}
+
+// Wrapper para chamar o api() externo (que usa fetch ao Apps Script)
+async function callApi(scriptUrl, action, params) {
+  return await api(scriptUrl, action, params);
+}
+
 function hashStr(s){
   let h=0;
   for(let i=0;i<s.length;i++)h=((h<<5)-h+s.charCodeAt(i))|0;
@@ -2783,6 +2938,70 @@ function CategoryEditor({apiKey,cats,onAdd,onCancel,toast_}){
   );
 }
 
+function MigrationCard({cfg,toast_}){
+  const [running,setRunning]=useState(false);
+  const [logs,setLogs]=useState([]);
+  const [stats,setStats]=useState(null);
+  
+  const handleMigrate=async()=>{
+    if(!confirm("⚠️ MIGRAÇÃO PARA SUPABASE\n\nIsso vai:\n• Ler tudo do seu Sheets\n• Copiar para o Supabase\n• Não apaga nada do Sheets (fica como backup)\n\nPode demorar alguns minutos. Tem certeza?"))return;
+    
+    setRunning(true);
+    setLogs(["🚀 Iniciando migração..."]);
+    setStats(null);
+    
+    try{
+      const result=await migrateSheetsToSupabase(cfg.scriptUrl,(msg)=>{
+        setLogs(prev=>[...prev,msg].slice(-30));
+      });
+      setStats(result);
+      if(result.errors.length===0){
+        toast_("✅ Migração concluída sem erros!");
+      }else{
+        toast_(`⚠️ Migração concluída com ${result.errors.length} erro(s)`,"err");
+      }
+    }catch(err){
+      setLogs(prev=>[...prev,"💥 ERRO: "+err.message]);
+      toast_("❌ "+err.message,"err");
+    }
+    setRunning(false);
+  };
+  
+  return React.createElement(Card,{title:"🚀 Migrar para Supabase"},
+    React.createElement("div",{style:{fontSize:12,color:"#6b7280",marginBottom:12,lineHeight:1.5}},
+      "Copia ",React.createElement("b",null,"todos os dados")," do Google Sheets para o Supabase.",
+      React.createElement("br"),
+      "O Sheets continua intocado (backup). Use só uma vez."
+    ),
+    React.createElement("button",{
+      onClick:handleMigrate,
+      disabled:running,
+      style:{width:"100%",padding:12,borderRadius:12,background:running?"#9ca3af":"#16a34a",color:"#fff",border:"none",fontWeight:700,fontSize:14,cursor:running?"wait":"pointer"}
+    },running?"⏳ Migrando...":"🚀 Iniciar migração"),
+    
+    logs.length>0&&React.createElement("div",{style:{marginTop:12,padding:10,background:"#0f172a",borderRadius:10,maxHeight:240,overflowY:"auto",fontFamily:"monospace",fontSize:11,color:"#e2e8f0",lineHeight:1.6}},
+      logs.map((l,i)=>React.createElement("div",{key:i},l))
+    ),
+    
+    stats&&React.createElement("div",{style:{marginTop:12,padding:12,background:stats.errors.length?"#fef3c7":"#dcfce7",borderRadius:10}},
+      React.createElement("div",{style:{fontWeight:700,marginBottom:6,fontSize:13}},stats.errors.length?"⚠️ Concluído com avisos":"✅ Tudo migrado!"),
+      React.createElement("div",{style:{fontSize:11,color:"#374151",lineHeight:1.6}},
+        `💰 ${stats.expenses} despesas · 💳 ${stats.imports} importações · 🏦 ${stats.accounts} contas`,
+        React.createElement("br"),
+        `👥 ${stats.payers} pessoas · 🏷️ ${stats.categories} categorias · 🧠 ${stats.learning} aprendizados`,
+        stats.errors.length>0&&React.createElement(React.Fragment,null,
+          React.createElement("br"),
+          React.createElement("b",{style:{color:"#92400e"}},`${stats.errors.length} erro(s):`),
+          React.createElement("ul",{style:{marginTop:4,paddingLeft:16,fontSize:10}},
+            stats.errors.slice(0,5).map((e,i)=>React.createElement("li",{key:i},e)),
+            stats.errors.length>5&&React.createElement("li",null,`...e mais ${stats.errors.length-5}`)
+          )
+        )
+      )
+    )
+  );
+}
+
 function SettingsView({payers,cfg,lmap,cats,apiKey,setApiKey,uploadFolderUrl,onAddPayer,onDeletePayer,onChangeUrl,onDeleteLearning,onAddCategory,onDeleteCategory,onResetData,onCleanupDuplicates,onFixPayers,onBack,toast_,onRefresh,syncing}){
   const [newPayer,setNewPayer]=useState("");const [url,setUrl]=useState(cfg.scriptUrl||"");
   const [keyInput,setKeyInput]=useState(apiKey||"");const [showKey,setShowKey]=useState(false);
@@ -2844,6 +3063,7 @@ function SettingsView({payers,cfg,lmap,cats,apiKey,setApiKey,uploadFolderUrl,onA
         ),
         React.createElement("button",{onClick:onCleanupDuplicates,style:{width:"100%",padding:12,borderRadius:12,background:"#f59e0b",color:"#fff",border:"none",fontWeight:700,fontSize:14}},"🔍 Procurar duplicatas")
       ),
+      React.createElement(MigrationCard,{cfg,toast_}),
       React.createElement(Card,{title:"⚠️ Zona de perigo"},
         React.createElement("div",{style:{fontSize:12,color:"#6b7280",marginBottom:12,lineHeight:1.5}},
           "Apaga ",React.createElement("b",null,"todas")," as despesas, importações pendentes e aprendizado de vínculos.",
@@ -2864,6 +3084,7 @@ function SettingsView({payers,cfg,lmap,cats,apiKey,setApiKey,uploadFolderUrl,onA
 
 function App(){
   const [view,setView]=useState("home");
+  const inFlightImportsRef=React.useRef(new Set());
   const [localFiles,setLocalFiles]=useState([]);
   const [desktop,setDesktop]=useState(()=>window.innerWidth>768);
   
@@ -2916,12 +3137,38 @@ function App(){
     try{
       const r=await api(cfg.scriptUrl,"getAll");
       if(r.ok){
-        setExpenses(r.expenses||[]);
+        // Deduplicação defensiva: garante 1 item por ID (evita bug visual)
+        const dedupById=arr=>{
+          const m=new Map();
+          (arr||[]).forEach(x=>{if(x?.id)m.set(x.id,x);});
+          return [...m.values()];
+        };
+        const cleanImports=dedupById(r.imports);
+        const cleanExpenses=dedupById(r.expenses);
+        
+        // Items em trânsito: não deixa o servidor sobrescrever otimismo
+        const inFlight=inFlightImportsRef.current;
+        
+        if(inFlight.size>0){
+          setExpenses(prev=>{
+            const optimistic=prev.filter(e=>
+              e.importId&&inFlight.has(e.importId)&&
+              !cleanExpenses.some(se=>se.importId===e.importId)
+            );
+            return [...optimistic,...cleanExpenses];
+          });
+          setImports(cleanImports.map(imp=>
+            inFlight.has(imp.id)?{...imp,status:"lancada"}:imp
+          ));
+        }else{
+          setExpenses(cleanExpenses);
+          setImports(cleanImports);
+        }
+        
         setLmap(r.learning||{});
         if(r.payers?.length)setPayers(r.payers);
         if(r.categories?.length)setCats(r.categories);
         setAccounts(r.accounts||[]);
-        setImports(r.imports||[]);
         setMatchPenalties(r.matchPenalties||{});
       }else throw new Error(r.error);
       await checkUploads();
@@ -3025,7 +3272,7 @@ function App(){
       return null;
     }
   };
-  const deleteUploadFile=async(id)=>{try{await api(cfg.scriptUrl,"deleteUpload",{id});setPendingUploads(p=>p.filter(u=>u.id!==id));}catch{}};
+  const deleteUploadFile=async(id)=>{try{await api(cfg.scriptUrl,"moveToProcessed",{id});setPendingUploads(p=>p.filter(u=>u.id!==id));}catch{}};
   const finishUploadProcessing=()=>{setView("home");checkUploads();toast_("✅ Concluído!");};
   const deleteExpense=async(id)=>{setExpenses(p=>p.filter(e=>e.id!==id));try{await api(cfg.scriptUrl,"deleteExpense",{id});}catch{}toast_("✅ Excluído");};
   const addPayer=async(name)=>{setPayers(p=>[...p,name]);try{await api(cfg.scriptUrl,"addPayer",{name});}catch{}};
@@ -3273,14 +3520,26 @@ function App(){
     
     if(newExpenses.length===0)return;
     
+    // Marca como em trânsito (syncDown ignora esses)
+    ids.forEach(id=>inFlightImportsRef.current.add(id));
+    
     // UI atualiza imediatamente (sem espera)
     setExpenses(p=>[...newExpenses,...p]);
     setImports(p=>p.map(i=>idsSet.has(i.id)?{...i,status:"lancada"}:i));
     toast_(`✅ ${newExpenses.length} lançada(s)`);
     
-    // API em background, sem syncDown depois (otimista é confiável)
+    // API em background — após confirmar, libera do set após delay
     api(cfg.scriptUrl,"launchImports",{ids,payerByAccount,accountNameById})
-      .catch(err=>toast_("⚠️ Erro ao salvar: "+err.message+" (use 🔄 para sincronizar)","err"));
+      .then(()=>{
+        // Espera 8s antes de liberar (suficiente pra qualquer syncDown em curso terminar)
+        setTimeout(()=>{
+          ids.forEach(id=>inFlightImportsRef.current.delete(id));
+        },8000);
+      })
+      .catch(err=>{
+        ids.forEach(id=>inFlightImportsRef.current.delete(id));
+        toast_("⚠️ Erro ao salvar: "+err.message+" (use 🔄 para sincronizar)","err");
+      });
   };
   
   const deleteSessionFn=async(sessionId,alsoDeleteExpenses)=>{
