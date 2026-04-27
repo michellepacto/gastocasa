@@ -617,6 +617,70 @@ function findDuplicateExpense(imp,expenses){
   return null;
 }
 
+// ─── RECONCILIATION ─────────────────────────────────────────
+// Calcula score de match entre uma despesa e um import (0-100)
+function matchScore(expense,imp){
+  if(!expense||!imp)return 0;
+  
+  // 1. Valor (crítico, ±R$1)
+  const valDiff=Math.abs((+expense.total||0)-(+imp.totalAmount||0));
+  if(valDiff>1.0)return 0; // sem chance se valor diverge muito
+  const valScore=valDiff<0.01?40:valDiff<0.50?35:25;
+  
+  // 2. Data (±3 dias)
+  if(!expense.date||!imp.date)return 0;
+  const d1=new Date(expense.date+"T12:00");
+  const d2=new Date(imp.date+"T12:00");
+  const dayDiff=Math.abs((d1-d2)/86400000);
+  if(dayDiff>3)return 0;
+  const dateScore=dayDiff<0.5?30:dayDiff<=1?25:dayDiff<=2?15:8;
+  
+  // 3. Estabelecimento (palavras em comum)
+  const normalize=s=>(s||"").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/[^a-z0-9 ]/g," ").replace(/\s+/g," ").trim();
+  const m1=normalize(expense.merchant);
+  const m2=normalize(imp.title);
+  if(!m1||!m2)return valScore+dateScore;
+  const words1=m1.split(/\s+/).filter(w=>w.length>2);
+  const words2=m2.split(/\s+/).filter(w=>w.length>2);
+  let common=0;
+  for(const w of words1){
+    if(words2.some(w2=>w2.includes(w)||w.includes(w2)))common++;
+  }
+  const nameScore=common===0?0:common===1?15:30;
+  
+  return valScore+dateScore+nameScore;
+}
+
+// Busca matches em uma lista de imports para uma expense
+// Retorna lista ordenada por score (descendente)
+function findImportMatches(expense,imports,minScore=50){
+  if(!expense||!imports)return [];
+  const matches=[];
+  for(const imp of imports){
+    if(imp.status==="vinculada"||imp.status==="lancada")continue;
+    if(imp.status==="ignorada")continue;
+    const score=matchScore(expense,imp);
+    if(score>=minScore)matches.push({imp,score});
+  }
+  matches.sort((a,b)=>b.score-a.score);
+  return matches;
+}
+
+// Busca matches em uma lista de expenses para um import
+function findExpenseMatches(imp,expenses,minScore=50){
+  if(!imp||!expenses)return [];
+  const matches=[];
+  for(const exp of expenses){
+    if(exp.importId)continue; // já vinculado
+    const score=matchScore(exp,imp);
+    if(score>=minScore)matches.push({exp,score});
+  }
+  matches.sort((a,b)=>b.score-a.score);
+  return matches;
+}
+
+function isStrongMatch(score){return score>=80;}
+
 const Toast=({t})=>React.createElement("div",{style:{position:"fixed",top:16,left:"50%",transform:"translateX(-50%)",background:t.type==="err"?"#dc2626":"#1a3a2a",color:"#fff",padding:"10px 22px",borderRadius:24,zIndex:9999,fontSize:14,fontWeight:600,boxShadow:"0 4px 20px rgba(0,0,0,.25)",maxWidth:400,textAlign:"center"}},t.msg);
 const Wrap=({children,pb=80,wide=false})=>React.createElement("div",{style:{maxWidth:wide?1200:430,margin:"0 auto",minHeight:"100vh",background:"#f4f1eb",paddingBottom:pb,position:"relative"}},children);
 const Card=({title,children,style={},onClick,right})=>React.createElement("div",{style:{background:"#fff",borderRadius:20,padding:16,marginBottom:14,boxShadow:"0 1px 8px rgba(0,0,0,.06)",cursor:onClick?"pointer":"default",...style},onClick},
@@ -624,15 +688,20 @@ const Card=({title,children,style={},onClick,right})=>React.createElement("div",
   children
 );
 
-const ExpRow=({e,cats})=>{
+const ExpRow=({e,cats,accounts})=>{
   const cat=getCat(cats,e.category);
   const split=effectiveSplit(e);
   const isPdf=e.driveUrl&&/\.pdf(\?|$)/i.test(e.driveUrl);
-  return React.createElement("div",{style:{display:"flex",alignItems:"center",gap:12,padding:"11px 0",borderBottom:"1px solid #f0ede6"}},
+  const account=e.account&&accounts?accounts.find(a=>a.name===e.account):null;
+  const linked=!!e.importId;
+  return React.createElement("div",{style:{display:"flex",alignItems:"center",gap:12,padding:"11px 0",borderBottom:"1px solid #f0ede6",borderLeft:account?`4px solid ${account.color}`:"none",paddingLeft:account?10:0,marginLeft:account?-10:0}},
     React.createElement("div",{style:{width:40,height:40,borderRadius:13,background:cat.c+"20",display:"flex",alignItems:"center",justifyContent:"center",fontSize:18,flexShrink:0}},cat.i),
     React.createElement("div",{style:{flex:1,minWidth:0}},
-      React.createElement("div",{style:{fontWeight:600,fontSize:13,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}},e.merchant||"Sem nome"),
-      React.createElement("div",{style:{fontSize:11,color:"#6b7280"}},`${dtBR(e.date)} · ${e.payer}${split.length>1?` · ÷${split.length}`:""}${e.driveUrl?(isPdf?" · 📄":" · 📎"):""}`)
+      React.createElement("div",{style:{fontWeight:600,fontSize:13,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",display:"flex",alignItems:"center",gap:4}},
+        linked&&React.createElement("span",{title:"Vinculado a lançamento bancário",style:{color:"#16a34a",fontSize:11,flexShrink:0}},"🔗"),
+        e.merchant||"Sem nome"
+      ),
+      React.createElement("div",{style:{fontSize:11,color:"#6b7280"}},`${dtBR(e.date)} · ${e.payer}${split.length>1?` · ÷${split.length}`:""}${e.account?` · ${e.account.split(" ")[0]}`:""}${e.driveUrl?(isPdf?" · 📄":" · 📎"):""}`)
     ),
     React.createElement("div",{style:{fontWeight:700,fontSize:14,flexShrink:0,textAlign:"right"}},
       React.createElement("div",null,brl(e.total)),
@@ -675,6 +744,32 @@ const KPI=({label,value,sub,color})=>React.createElement("div",{style:{flex:1,mi
   React.createElement("div",{style:{fontSize:18,fontWeight:800,color:color||"#1a1a1a",lineHeight:1.1,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}},value),
   sub&&React.createElement("div",{style:{fontSize:10,color:"#9ca3af",marginTop:2}},sub)
 );
+
+// MatchSuggestion: mostra sugestões de vínculo
+const MatchSuggestion=({matches,accounts,onSelect,onSkip,title="🔗 Encontramos lançamentos bancários parecidos:"})=>{
+  if(!matches||matches.length===0)return null;
+  return React.createElement("div",{style:{padding:14,background:"#f0fdf4",border:"1.5px solid #16a34a",borderRadius:14,marginBottom:14}},
+    React.createElement("div",{style:{fontWeight:700,fontSize:13,color:"#166534",marginBottom:10}},title),
+    React.createElement("div",{style:{display:"flex",flexDirection:"column",gap:8}},
+      matches.slice(0,3).map(({imp,score})=>{
+        const acc=accounts.find(a=>a.id===imp.accountId);
+        const strong=isStrongMatch(score);
+        return React.createElement("div",{key:imp.id,onClick:()=>onSelect(imp),style:{padding:10,background:"#fff",borderRadius:10,border:"1.5px solid "+(strong?"#16a34a":"#bbf7d0"),cursor:"pointer",display:"flex",alignItems:"center",gap:10}},
+          React.createElement("div",{style:{flex:1,minWidth:0}},
+            React.createElement("div",{style:{display:"flex",alignItems:"center",gap:6,marginBottom:3}},
+              acc&&React.createElement("div",{style:{width:8,height:8,borderRadius:"50%",background:acc.color,flexShrink:0}}),
+              React.createElement("div",{style:{fontWeight:700,fontSize:13,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}},imp.title),
+              strong&&React.createElement("span",{style:{fontSize:9,padding:"1px 6px",borderRadius:6,background:"#16a34a",color:"#fff",fontWeight:700}},"Match forte")
+            ),
+            React.createElement("div",{style:{fontSize:11,color:"#6b7280"}},`${dtBR(imp.date)} · ${acc?acc.name:"?"} · ${brl(imp.totalAmount)}${imp.installment?` · 📦 ${imp.installment}`:""}`)
+          ),
+          React.createElement("button",{onClick:(e)=>{e.stopPropagation();onSelect(imp);},style:{padding:"6px 12px",borderRadius:10,border:"none",background:"#16a34a",color:"#fff",fontWeight:700,fontSize:12,cursor:"pointer",whiteSpace:"nowrap"}},"✓ Vincular")
+        );
+      })
+    ),
+    onSkip&&React.createElement("button",{onClick:onSkip,style:{marginTop:10,width:"100%",padding:8,borderRadius:10,border:"1.5px solid #e5e7eb",background:"#fff",color:"#6b7280",fontWeight:600,fontSize:12,cursor:"pointer"}},"Pular — salvar sem vincular")
+  );
+};
 
 // ─── IMPORT VIEW ─────────────────────────────────────────────
 function ImportView({accounts,imports,expenses,cats,payers,lmap,scriptUrl,onAddAccount,onDeleteAccount,onUploadCsv,onUpdateImport,onDeleteImport,onLaunchImports,onBack,toast_}){
@@ -1085,7 +1180,7 @@ function UploadCsvSection({accounts,onUploadCsv,toast_,payers}){
   );
 }
 
-function DashboardView({expenses,cats,payers,onBack}){
+function DashboardView({expenses,cats,payers,accounts,onBack}){
   const [period,setPeriod]=useState("thisMonth");
   const [tab,setTab]=useState("resumo");
   const [filterPerson,setFilterPerson]=useState("todos");
@@ -1286,7 +1381,7 @@ function DashboardView({expenses,cats,payers,onBack}){
           React.createElement("span",{style:{fontSize:14,color:"#9ca3af",marginLeft:4}},expanded?"▲":"▼")
         ),
         expanded&&React.createElement("div",{style:{padding:"0 14px 14px",borderTop:"1px solid #f0ede6"}},
-          catExpenses.map(e=>React.createElement(ExpRow,{key:e.id,e,cats}))
+          catExpenses.map(e=>React.createElement(ExpRow,{key:e.id,e,cats,accounts}))
         )
       );
     })
@@ -1411,10 +1506,12 @@ function SetupView({onSave,toast_}){
   );
 }
 
-function CaptureView({payers,lmap,cats,apiKey,onSave,onBack,toast_}){
+function CaptureView({payers,lmap,cats,apiKey,imports,accounts,onSave,onSaveLinked,onBack,toast_}){
   const [stage,setStage]=useState("pick");const [imageUrl,setImageUrl]=useState(null);const [b64,setB64]=useState(null);
   const [result,setResult]=useState({merchant:"",total:"",date:today(),category:"Outros",items:[]});
   const [payer,setPayer]=useState(payers[0]||"Eu");const [splitWith,setSplitWith]=useState([...payers]);
+  const [matches,setMatches]=useState([]);
+  const [pendingExp,setPendingExp]=useState(null);
   const fileRef=useRef();
   const handleFile=async(file)=>{
     if(!file)return;if(!apiKey){toast_("⚠️ Configure a chave em ⚙️","err");return;}
@@ -1429,7 +1526,34 @@ function CaptureView({payers,lmap,cats,apiKey,onSave,onBack,toast_}){
     const v=parseFloat((result.total||"0").replace(",","."));
     if(!v){toast_("Informe o valor","err");return;}
     if(splitWith.length===0){toast_("Selecione quem divide","err");return;}
-    setStage("saving");await onSave({...result,total:v,payer,splitWith,imageBase64:b64,mimeType:"image/jpeg"});
+    
+    // Tenta matching antes de salvar
+    const tempExp={merchant:result.merchant,total:v,date:result.date};
+    const found=findImportMatches(tempExp,imports||[],50);
+    
+    if(found.length>0){
+      // Mostra sugestão
+      setPendingExp({...result,total:v,payer,splitWith,imageBase64:b64,mimeType:"image/jpeg"});
+      setMatches(found);
+      setStage("matching");
+      return;
+    }
+    
+    // Salva normalmente
+    setStage("saving");
+    await onSave({...result,total:v,payer,splitWith,imageBase64:b64,mimeType:"image/jpeg"});
+  };
+  
+  const handleLinkMatch=async(imp)=>{
+    setStage("saving");
+    const acc=accounts?.find(a=>a.id===imp.accountId);
+    // Salva expense e cria vínculo
+    const expWithLink={...pendingExp,account:acc?.name||"",importId:imp.id,payer:acc?.payer||pendingExp.payer};
+    await onSaveLinked(expWithLink,imp.id);
+  };
+  const handleSkipMatch=async()=>{
+    setStage("saving");
+    await onSave(pendingExp);
   };
   if(stage==="pick")return React.createElement(Wrap,{pb:20},React.createElement(Header,{title:"Novo gasto",onBack}),
     React.createElement("div",{style:{padding:16}},
@@ -1450,6 +1574,12 @@ function CaptureView({payers,lmap,cats,apiKey,onSave,onBack,toast_}){
   );
   if(stage==="saving")return React.createElement(Wrap,{pb:20},React.createElement(Header,{title:"Salvando..."}),
     React.createElement("div",{style:{display:"flex",flexDirection:"column",alignItems:"center",padding:60,gap:20}},React.createElement(Spinner,{size:48,color:"#2d5a3d"}))
+  );
+  if(stage==="matching")return React.createElement(Wrap,{pb:20},
+    React.createElement(Header,{title:"Possível vínculo encontrado",onBack:()=>setStage("review")}),
+    React.createElement("div",{style:{padding:16}},
+      React.createElement(MatchSuggestion,{matches,accounts:accounts||[],onSelect:handleLinkMatch,onSkip:handleSkipMatch})
+    )
   );
   return React.createElement(Wrap,{pb:20},React.createElement(Header,{title:"Revisar dados",onBack}),
     React.createElement(ReviewForm,{imageUrl,result,setResult,payer,setPayer,splitWith,setSplitWith,payers,cats,onSave:handleSave})
@@ -1507,7 +1637,7 @@ function UploadProcessor({uploads,payers,lmap,cats,apiKey,scriptUrl,onSave,onDel
   );
 }
 
-function HistoryView({expenses,cats,onBack,onDelete}){
+function HistoryView({expenses,cats,accounts,onBack,onDelete,onUnlink}){
   const [filterCat,setFilterCat]=useState("Todas");const [filterMonth,setFilterMonth]=useState("all");
   const months=[...new Set(expenses.map(e=>e.date?.slice(0,7)))].sort().reverse();
   const filtered=expenses.filter(e=>{
@@ -1527,7 +1657,11 @@ function HistoryView({expenses,cats,onBack,onDelete}){
       React.createElement("div",{style:{overflowX:"auto",display:"flex",gap:8,paddingBottom:12}},["Todas",...cats.map(c=>c.n)].map(c=>React.createElement("button",{key:c,onClick:()=>setFilterCat(c),style:{padding:"6px 12px",borderRadius:20,border:"none",whiteSpace:"nowrap",background:filterCat===c?"#1a3a2a":"#f3f4f6",color:filterCat===c?"#fff":"#374151",fontWeight:600,fontSize:12}},c==="Todas"?"Todas":`${getCat(cats,c).i} ${c}`))),
       React.createElement(Card,null,
         filtered.length===0&&React.createElement("div",{style:{textAlign:"center",color:"#9ca3af",padding:20,fontSize:14}},"Nenhum gasto"),
-        filtered.map(e=>React.createElement("div",{key:e.id,style:{display:"flex",alignItems:"center",gap:8}},React.createElement("div",{style:{flex:1}},React.createElement(ExpRow,{e,cats})),React.createElement("button",{onClick:()=>{if(confirm(`Excluir ${brl(e.total)}?`))onDelete(e.id);},style:{background:"none",border:"none",fontSize:18,padding:4,color:"#dc2626"}},"🗑️")))
+        filtered.map(e=>React.createElement("div",{key:e.id,style:{display:"flex",alignItems:"center",gap:8}},
+          React.createElement("div",{style:{flex:1}},React.createElement(ExpRow,{e,cats,accounts})),
+          e.importId&&onUnlink&&React.createElement("button",{onClick:()=>{if(confirm(`Desvincular do lançamento bancário?`))onUnlink(e.id);},title:"Desvincular do lançamento bancário",style:{background:"none",border:"none",fontSize:14,padding:4,color:"#f59e0b"}},"🔓"),
+          React.createElement("button",{onClick:()=>{if(confirm(`Excluir ${brl(e.total)}?`))onDelete(e.id);},style:{background:"none",border:"none",fontSize:18,padding:4,color:"#dc2626"}},"🗑️")
+        ))
       )
     )
   );
@@ -1680,8 +1814,38 @@ function App(){
     if(e.merchant&&e.category)setLmap(p=>({...p,[e.merchant]:e.category}));
     try{const r=await api(cfg.scriptUrl,"save",{expense:e});if(!r.ok)throw new Error(r.error);if(r.driveUrl)setExpenses(p=>p.map(x=>x.id===e.id?{...x,driveUrl:r.driveUrl}:x));toast_("✅ Salvo!");}
     catch(err){toast_("⚠️ Local: "+err.message,"err");}
+    return e;
   };
+  
+  // Salva expense E vincula com import bancário existente
+  const saveLinkedExpense=async(exp,importId)=>{
+    const e={...exp,id:Date.now()+"",at:new Date().toISOString()};
+    setExpenses(p=>[e,...p]);
+    if(e.merchant&&e.category)setLmap(p=>({...p,[e.merchant]:e.category}));
+    setImports(p=>p.map(i=>i.id===importId?{...i,status:"vinculada",expenseId:e.id}:i));
+    try{
+      const r=await api(cfg.scriptUrl,"save",{expense:e});
+      if(!r.ok)throw new Error(r.error);
+      if(r.driveUrl)setExpenses(p=>p.map(x=>x.id===e.id?{...x,driveUrl:r.driveUrl}:x));
+      // Faz o link no backend
+      await api(cfg.scriptUrl,"linkExpense",{expenseId:e.id,importId,accountName:e.account});
+      toast_("✅ Salvo e vinculado!");
+    }catch(err){toast_("⚠️ Local: "+err.message,"err");}
+    return e;
+  };
+  
+  const unlinkExpenseFn=async(expenseId)=>{
+    const exp=expenses.find(e=>e.id===expenseId);
+    if(!exp||!exp.importId)return;
+    const oldImpId=exp.importId;
+    setExpenses(p=>p.map(e=>e.id===expenseId?{...e,importId:""}:e));
+    setImports(p=>p.map(i=>i.id===oldImpId?{...i,status:"pendente",expenseId:""}:i));
+    try{await api(cfg.scriptUrl,"unlinkExpense",{expenseId});toast_("✅ Desvinculado");}
+    catch(err){toast_("⚠️ "+err.message,"err");}
+  };
+  
   const saveAndReturnHome=async(exp)=>{await saveExpense(exp);setView("home");};
+  const saveLinkedAndReturnHome=async(exp,importId)=>{await saveLinkedExpense(exp,importId);setView("home");};
   const deleteUploadFile=async(id)=>{try{await api(cfg.scriptUrl,"deleteUpload",{id});setPendingUploads(p=>p.filter(u=>u.id!==id));}catch{}};
   const finishUploadProcessing=()=>{setView("home");checkUploads();toast_("✅ Concluído!");};
   const deleteExpense=async(id)=>{setExpenses(p=>p.filter(e=>e.id!==id));try{await api(cfg.scriptUrl,"deleteExpense",{id});}catch{}toast_("✅ Excluído");};
@@ -1704,9 +1868,51 @@ function App(){
     try{await api(cfg.scriptUrl,"deleteAccount",{id});toast_("✅ Removida");}catch{}
   };
   const uploadCsv=async(items)=>{
-    try{const r=await api(cfg.scriptUrl,"addImports",{imports:items});
-      if(r.ok){await syncDown();return r;}
-      throw new Error(r.error);
+    try{
+      // Auto-vincula matches fortes ANTES de mandar
+      const enrichedItems=items.map(it=>{
+        if(it.status!=="pendente")return it;
+        const matches=findExpenseMatches(it,expenses,85); // só matches fortes
+        if(matches.length>0){
+          // Auto-vincula
+          return {...it,_autoLinkExpenseId:matches[0].exp.id};
+        }
+        return it;
+      });
+      
+      const r=await api(cfg.scriptUrl,"addImports",{imports:enrichedItems.map(({_autoLinkExpenseId,...rest})=>rest)});
+      if(!r.ok)throw new Error(r.error);
+      
+      // Após sync, faz os links automáticos
+      await syncDown();
+      
+      // Pega imports recém-criados (matched por hash)
+      const linksToCreate=enrichedItems.filter(i=>i._autoLinkExpenseId);
+      if(linksToCreate.length>0){
+        // Re-fetch para pegar os IDs corretos do backend
+        const fresh=await api(cfg.scriptUrl,"getAll");
+        if(fresh.ok){
+          const accById=Object.fromEntries(accounts.map(a=>[a.id,a]));
+          for(const orig of linksToCreate){
+            const imp=(fresh.imports||[]).find(i=>i.hash===orig.hash);
+            if(!imp)continue;
+            const acc=accById[imp.accountId];
+            try{
+              await api(cfg.scriptUrl,"linkExpense",{
+                expenseId:orig._autoLinkExpenseId,
+                importId:imp.id,
+                accountName:acc?.name||""
+              });
+            }catch{}
+          }
+          await syncDown();
+        }
+      }
+      
+      const linked=linksToCreate.length;
+      const msg=linked>0?` (${linked} vinculadas automaticamente)`:"";
+      toast_(`✅ ${r.added||0} importadas${msg}`);
+      return r;
     }catch(err){toast_("⚠️ "+err.message,"err");return null;}
   };
   const updateImport=async(id,updates)=>{
@@ -1719,8 +1925,9 @@ function App(){
   };
   const launchImports=async(ids)=>{
     const payerByAccount={};
-    accounts.forEach(a=>{payerByAccount[a.id]=a.payer;});
-    try{const r=await api(cfg.scriptUrl,"launchImports",{ids,payerByAccount});
+    const accountNameById={};
+    accounts.forEach(a=>{payerByAccount[a.id]=a.payer;accountNameById[a.id]=a.name;});
+    try{const r=await api(cfg.scriptUrl,"launchImports",{ids,payerByAccount,accountNameById});
       if(r.ok){toast_(`✅ ${r.launched} despesa(s) lançada(s)!`);await syncDown();return r;}
       throw new Error(r.error);
     }catch(err){toast_("⚠️ "+err.message,"err");return null;}
@@ -1729,10 +1936,10 @@ function App(){
   if(!cfg.scriptUrl)return React.createElement(React.Fragment,null,toast&&React.createElement(Toast,{t:toast}),React.createElement(SetupView,{toast_,onSave:url=>setCfg({scriptUrl:url})}));
   const RouteWrap=({children})=>React.createElement(React.Fragment,null,toast&&React.createElement(Toast,{t:toast}),children);
 
-  if(view==="capture")return React.createElement(RouteWrap,null,React.createElement(CaptureView,{payers,lmap,cats,apiKey,onSave:saveAndReturnHome,onBack:()=>setView("home"),toast_}));
+  if(view==="capture")return React.createElement(RouteWrap,null,React.createElement(CaptureView,{payers,lmap,cats,apiKey,imports,accounts,onSave:saveAndReturnHome,onSaveLinked:saveLinkedAndReturnHome,onBack:()=>setView("home"),toast_}));
   if(view==="upload")return React.createElement(RouteWrap,null,React.createElement(UploadProcessor,{uploads:pendingUploads,payers,lmap,cats,apiKey,scriptUrl:cfg.scriptUrl,onSave:saveExpense,onDeleteUpload:deleteUploadFile,onFinish:finishUploadProcessing,toast_}));
-  if(view==="history")return React.createElement(RouteWrap,null,React.createElement(HistoryView,{expenses,cats,onBack:()=>setView("home"),onDelete:deleteExpense}));
-  if(view==="dashboard")return React.createElement(RouteWrap,null,React.createElement(DashboardView,{expenses,cats,payers,onBack:()=>setView("home")}));
+  if(view==="history")return React.createElement(RouteWrap,null,React.createElement(HistoryView,{expenses,cats,accounts,onBack:()=>setView("home"),onDelete:deleteExpense,onUnlink:unlinkExpenseFn}));
+  if(view==="dashboard")return React.createElement(RouteWrap,null,React.createElement(DashboardView,{expenses,cats,payers,accounts,onBack:()=>setView("home")}));
   if(view==="import")return React.createElement(RouteWrap,null,React.createElement(ImportView,{accounts,imports,expenses,cats,payers,lmap,scriptUrl:cfg.scriptUrl,onAddAccount:addAccount,onDeleteAccount:deleteAccountFn,onUploadCsv:uploadCsv,onUpdateImport:updateImport,onDeleteImport:deleteImportFn,onLaunchImports:launchImports,onBack:()=>setView("home"),toast_}));
   if(view==="settings")return React.createElement(RouteWrap,null,React.createElement(SettingsView,{payers,cfg,lmap,cats,apiKey,setApiKey,uploadFolderUrl,onAddPayer:addPayer,onDeletePayer:deletePayer,onChangeUrl:changeUrl,onDeleteLearning:deleteLearning,onAddCategory:addCategory,onDeleteCategory:deleteCategory,onBack:()=>setView("home"),toast_,onRefresh:syncDown,syncing}));
 
@@ -1790,7 +1997,7 @@ function App(){
       ),
       React.createElement(Card,null,
         expenses.length===0&&React.createElement("div",{style:{textAlign:"center",color:"#9ca3af",padding:20,fontSize:14}},"Nenhum gasto ainda"),
-        expenses.slice(0,8).map(e=>React.createElement(ExpRow,{key:e.id,e,cats}))
+        expenses.slice(0,8).map(e=>React.createElement(ExpRow,{key:e.id,e,cats,accounts}))
       )
     ),
     React.createElement("div",{style:{position:"fixed",bottom:0,left:"50%",transform:"translateX(-50%)",width:"100%",maxWidth:430,background:"#fff",borderTop:"1px solid #e5e7eb",display:"flex",justifyContent:"space-around",alignItems:"center",padding:"8px 0 18px",zIndex:100}},
