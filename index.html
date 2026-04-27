@@ -106,15 +106,32 @@ async function recompressBase64(base64,mimeType){
 
 async function api(url,action,params={}){
   if(!url)throw new Error("URL não configurada");
-  if(action==="getAll"||action==="listUploads"||action==="ensureUpload"){
-    const qs=new URLSearchParams({action,t:Date.now(),...params}).toString();
-    const r=await fetch(`${url}?${qs}`);
-    if(!r.ok)throw new Error("Erro "+r.status);
-    return r.json();
+  // Retry automático: até 4 tentativas com backoff exponencial
+  // Útil para "Failed to fetch", timeouts, e erros transitórios do Apps Script
+  let lastError=null;
+  for(let attempt=0;attempt<4;attempt++){
+    try{
+      let r;
+      if(action==="getAll"||action==="listUploads"||action==="ensureUpload"){
+        const qs=new URLSearchParams({action,t:Date.now(),...params}).toString();
+        r=await fetch(`${url}?${qs}`);
+      }else{
+        r=await fetch(url,{method:"POST",body:JSON.stringify({action,...params})});
+      }
+      if(!r.ok)throw new Error("Erro "+r.status);
+      return await r.json();
+    }catch(err){
+      lastError=err;
+      // Não tenta novamente em erros de URL/configuração
+      if(err.message.includes("URL não configurada"))throw err;
+      // Última tentativa? joga o erro
+      if(attempt===3)throw err;
+      // Backoff: 1s, 3s, 6s
+      const waitMs=[1000,3000,6000][attempt];
+      await new Promise(r=>setTimeout(r,waitMs));
+    }
   }
-  const r=await fetch(url,{method:"POST",body:JSON.stringify({action,...params})});
-  if(!r.ok)throw new Error("Erro "+r.status);
-  return r.json();
+  throw lastError;
 }
 
 async function callClaude(b64,mimeType,lmap,cats,apiKey){
@@ -666,9 +683,15 @@ function findDuplicateExpense(imp,expenses){
   return null;
 }
 
+// Normaliza string para chave de penalty (igual no servidor)
+function normMatchKey(s){
+  return String(s||"").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/[^a-z0-9 ]/g," ").replace(/\s+/g," ").trim();
+}
+
 // ─── RECONCILIATION ─────────────────────────────────────────
 // Calcula score de match entre uma despesa e um import (0-100)
-function matchScore(expense,imp){
+// penalties: mapa {chave: número de desvínculos prévios} — cada um tira 15 pontos
+function matchScore(expense,imp,penalties){
   if(!expense||!imp)return 0;
   
   // 1. Valor (crítico, ±R$1)
@@ -688,27 +711,37 @@ function matchScore(expense,imp){
   const normalize=s=>(s||"").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/[^a-z0-9 ]/g," ").replace(/\s+/g," ").trim();
   const m1=normalize(expense.merchant);
   const m2=normalize(imp.title);
-  if(!m1||!m2)return valScore+dateScore;
-  const words1=m1.split(/\s+/).filter(w=>w.length>2);
-  const words2=m2.split(/\s+/).filter(w=>w.length>2);
-  let common=0;
-  for(const w of words1){
-    if(words2.some(w2=>w2.includes(w)||w.includes(w2)))common++;
+  let nameScore=0;
+  if(m1&&m2){
+    const words1=m1.split(/\s+/).filter(w=>w.length>2);
+    const words2=m2.split(/\s+/).filter(w=>w.length>2);
+    let common=0;
+    for(const w of words1){
+      if(words2.some(w2=>w2.includes(w)||w.includes(w2)))common++;
+    }
+    nameScore=common===0?0:common===1?15:30;
   }
-  const nameScore=common===0?0:common===1?15:30;
   
-  return valScore+dateScore+nameScore;
+  let score=valScore+dateScore+nameScore;
+  
+  // Aplica penalty: cada desvínculo prévio = -15 pontos
+  if(penalties&&expense.merchant&&imp.title){
+    const key=normMatchKey(expense.merchant)+"|"+normMatchKey(imp.title);
+    const pen=penalties[key]||0;
+    score=Math.max(0,score-pen*15);
+  }
+  
+  return score;
 }
 
 // Busca matches em uma lista de imports para uma expense
-// Retorna lista ordenada por score (descendente)
-function findImportMatches(expense,imports,minScore=50){
+function findImportMatches(expense,imports,minScore=50,penalties){
   if(!expense||!imports)return [];
   const matches=[];
   for(const imp of imports){
     if(imp.status==="vinculada"||imp.status==="lancada")continue;
     if(imp.status==="ignorada")continue;
-    const score=matchScore(expense,imp);
+    const score=matchScore(expense,imp,penalties);
     if(score>=minScore)matches.push({imp,score});
   }
   matches.sort((a,b)=>b.score-a.score);
@@ -716,12 +749,12 @@ function findImportMatches(expense,imports,minScore=50){
 }
 
 // Busca matches em uma lista de expenses para um import
-function findExpenseMatches(imp,expenses,minScore=50){
+function findExpenseMatches(imp,expenses,minScore=50,penalties){
   if(!imp||!expenses)return [];
   const matches=[];
   for(const exp of expenses){
     if(exp.importId)continue; // já vinculado
-    const score=matchScore(exp,imp);
+    const score=matchScore(exp,imp,penalties);
     if(score>=minScore)matches.push({exp,score});
   }
   matches.sort((a,b)=>b.score-a.score);
@@ -1559,7 +1592,7 @@ function SetupView({onSave,toast_}){
   );
 }
 
-function CaptureView({payers,lmap,cats,apiKey,imports,accounts,onSave,onSaveLinked,onBack,toast_}){
+function CaptureView({payers,lmap,cats,apiKey,imports,accounts,matchPenalties,onSave,onSaveLinked,onBack,toast_}){
   const [stage,setStage]=useState("pick");const [imageUrl,setImageUrl]=useState(null);const [b64,setB64]=useState(null);
   const [result,setResult]=useState({merchant:"",total:"",date:today(),category:"Outros",items:[]});
   const [payer,setPayer]=useState(payers[0]||"Eu");const [splitWith,setSplitWith]=useState([...payers]);
@@ -1580,21 +1613,23 @@ function CaptureView({payers,lmap,cats,apiKey,imports,accounts,onSave,onSaveLink
     if(!v){toast_("Informe o valor","err");return;}
     if(splitWith.length===0){toast_("Selecione quem divide","err");return;}
     
-    // Tenta matching antes de salvar
+    // Auto-link: busca match e vincula automaticamente se houver
     const tempExp={merchant:result.merchant,total:v,date:result.date};
-    const found=findImportMatches(tempExp,imports||[],50);
+    const found=findImportMatches(tempExp,imports||[],50,matchPenalties);
     
-    if(found.length>0){
-      // Mostra sugestão
-      setPendingExp({...result,total:v,payer,splitWith,imageBase64:b64,mimeType:"image/jpeg"});
-      setMatches(found);
-      setStage("matching");
-      return;
-    }
-    
-    // Salva normalmente
     setStage("saving");
-    await onSave({...result,total:v,payer,splitWith,imageBase64:b64,mimeType:"image/jpeg"});
+    if(found.length>0){
+      // Auto-vincula com o melhor match
+      const bestImp=found[0].imp;
+      const acc=accounts?.find(a=>a.id===bestImp.accountId);
+      await onSaveLinked({
+        ...result,total:v,payer,splitWith,
+        imageBase64:b64,mimeType:"image/jpeg",
+        account:acc?.name||"",importId:bestImp.id
+      },bestImp.id);
+    }else{
+      await onSave({...result,total:v,payer,splitWith,imageBase64:b64,mimeType:"image/jpeg"});
+    }
   };
   
   const handleLinkMatch=async(imp)=>{
@@ -1628,12 +1663,6 @@ function CaptureView({payers,lmap,cats,apiKey,imports,accounts,onSave,onSaveLink
   if(stage==="saving")return React.createElement(Wrap,{pb:20},React.createElement(Header,{title:"Salvando..."}),
     React.createElement("div",{style:{display:"flex",flexDirection:"column",alignItems:"center",padding:60,gap:20}},React.createElement(Spinner,{size:48,color:"#2d5a3d"}))
   );
-  if(stage==="matching")return React.createElement(Wrap,{pb:20},
-    React.createElement(Header,{title:"Possível vínculo encontrado",onBack:()=>setStage("review")}),
-    React.createElement("div",{style:{padding:16}},
-      React.createElement(MatchSuggestion,{matches,accounts:accounts||[],onSelect:handleLinkMatch,onSkip:handleSkipMatch})
-    )
-  );
   return React.createElement(Wrap,{pb:20},React.createElement(Header,{title:"Revisar dados",onBack}),
     React.createElement(ReviewForm,{imageUrl,result,setResult,payer,setPayer,splitWith,setSplitWith,payers,cats,onSave:handleSave})
   );
@@ -1651,8 +1680,7 @@ function UploadProcessor({uploads,payers,lmap,cats,apiKey,scriptUrl,onSave,onDel
     setPayer(payers[0]||"Eu");setSplitWith([...payers]);setImageUrl(null);setPdfFilename(null);
     try{
       const r=await api(scriptUrl,"getUploadFile",{id:uploads[idx].id});
-      if(!r.ok)throw new Error(r.error||"Falha");
-      const isPdf=r.mimeType==="application/pdf";
+      if(!r.ok)throw new Error(r.error||"Falha");const isPdf=r.mimeType==="application/pdf";
       let finalB64=r.base64,finalMime=r.mimeType;
       if(!isPdf){finalB64=await recompressBase64(r.base64,r.mimeType);finalMime="image/jpeg";setImageUrl("data:image/jpeg;base64,"+finalB64);}
       else{setPdfFilename(r.name||uploads[idx].name);}
@@ -1719,7 +1747,7 @@ function UploadProcessor({uploads,payers,lmap,cats,apiKey,scriptUrl,onSave,onDel
 
 // ─── LOCAL FILE PROCESSOR ─────────────────────────────────
 // Processa arquivos selecionados diretamente do computador (sem Drive)
-function LocalFileProcessor({files,payers,lmap,cats,apiKey,imports,accounts,onSave,onSaveLinked,onFinish,toast_}){
+function LocalFileProcessor({files,payers,lmap,cats,apiKey,imports,accounts,matchPenalties,onSave,onSaveLinked,onFinish,toast_}){
   const [idx,setIdx]=useState(0);
   const [stage,setStage]=useState("loading");
   const [b64,setB64]=useState(null);
@@ -1786,11 +1814,11 @@ function LocalFileProcessor({files,payers,lmap,cats,apiKey,imports,accounts,onSa
           items:claude.items||[]
         };
         setResult(res);
-        // Busca matches bancários
+        // Busca matches bancários (com penalties pra aprender de erros passados)
         const v=parseFloat((res.total||"0").replace(",","."));
         if(v&&res.date){
           const tempExp={merchant:res.merchant,total:v,date:res.date};
-          const found=findImportMatches(tempExp,imports||[],50);
+          const found=findImportMatches(tempExp,imports||[],50,matchPenalties);
           setMatches(found);
         }
       }else{
@@ -1808,7 +1836,16 @@ function LocalFileProcessor({files,payers,lmap,cats,apiKey,imports,accounts,onSa
     if(!v){toast_("Informe o valor","err");return;}
     if(splitWith.length===0){toast_("Selecione quem divide","err");return;}
     setStage("saving");
-    await onSave({...result,total:v,payer,splitWith,imageBase64:b64,mimeType});
+    
+    // Auto-link com o melhor match se houver
+    if(matches.length>0){
+      const bestImp=matches[0].imp;
+      const acc=accounts?.find(a=>a.id===bestImp.accountId);
+      await onSaveLinked({...result,total:v,payer,splitWith,imageBase64:b64,mimeType,account:acc?.name||"",importId:bestImp.id},bestImp.id);
+    }else{
+      await onSave({...result,total:v,payer,splitWith,imageBase64:b64,mimeType});
+    }
+    
     if(idx+1<files.length){
       const waitSecs=mimeType==="application/pdf"?8:4;
       await sleepWithCountdown(waitSecs,toast_,"⏳ Próximo em");
@@ -1866,13 +1903,18 @@ function LocalFileProcessor({files,payers,lmap,cats,apiKey,imports,accounts,onSa
   return React.createElement(Wrap,{pb:20},
     React.createElement(Header,{title:"Revisar comprovante",subtitle,onBack:onFinish}),
     React.createElement("div",{style:{padding:16}},
-      // Sugestão de vínculo bancário
-      matches.length>0&&React.createElement(MatchSuggestion,{
-        matches,accounts:accounts||[],
-        onSelect:handleLinkMatch,
-        onSkip:null, // não precisa skip aqui, tem o form abaixo
-        title:"🔗 Lançamento bancário correspondente:"
-      }),
+      // Banner: vai vincular automaticamente
+      matches.length>0&&React.createElement("div",{style:{padding:12,background:"#f0fdf4",border:"1.5px solid #16a34a",borderRadius:12,marginBottom:14}},
+        React.createElement("div",{style:{display:"flex",alignItems:"center",gap:8,marginBottom:4}},
+          React.createElement("span",{style:{fontSize:18}},"🔗"),
+          React.createElement("div",{style:{fontWeight:700,fontSize:13,color:"#166534"}},"Será vinculado automaticamente:")
+        ),
+        (()=>{const imp=matches[0].imp;const acc=accounts?.find(a=>a.id===imp.accountId);return React.createElement("div",{style:{fontSize:12,color:"#166534",paddingLeft:26}},
+          React.createElement("div",{style:{fontWeight:600}},imp.title),
+          React.createElement("div",{style:{fontSize:11,opacity:.85}},`${dtBR(imp.date)} · ${acc?.name||"?"} · ${brl(imp.totalAmount)} · score ${matches[0].score}%`)
+        );})(),
+        React.createElement("div",{style:{fontSize:11,color:"#9ca3af",marginTop:6,paddingLeft:26}},"Você pode editar depois no histórico se errar.")
+      ),
       React.createElement(ReviewForm,{
         imageUrl,pdfFilename,result,setResult,payer,setPayer,
         splitWith,setSplitWith,payers,cats,
@@ -1885,7 +1927,7 @@ function LocalFileProcessor({files,payers,lmap,cats,apiKey,imports,accounts,onSa
 }
 
 
-function HistoryView({expenses,cats,accounts,onBack,onDelete,onUnlink}){
+function HistoryView({expenses,cats,accounts,onBack,onDelete,onUnlink,onEdit}){
   const [filterCat,setFilterCat]=useState("Todas");const [filterMonth,setFilterMonth]=useState("all");
   const months=[...new Set(expenses.map(e=>e.date?.slice(0,7)))].sort().reverse();
   const filtered=expenses.filter(e=>{
@@ -1906,10 +1948,155 @@ function HistoryView({expenses,cats,accounts,onBack,onDelete,onUnlink}){
       React.createElement(Card,null,
         filtered.length===0&&React.createElement("div",{style:{textAlign:"center",color:"#9ca3af",padding:20,fontSize:14}},"Nenhum gasto"),
         filtered.map(e=>React.createElement("div",{key:e.id,style:{display:"flex",alignItems:"center",gap:8}},
-          React.createElement("div",{style:{flex:1}},React.createElement(ExpRow,{e,cats,accounts})),
-          e.importId&&onUnlink&&React.createElement("button",{onClick:()=>{if(confirm(`Desvincular do lançamento bancário?`))onUnlink(e.id);},title:"Desvincular do lançamento bancário",style:{background:"none",border:"none",fontSize:14,padding:4,color:"#f59e0b"}},"🔓"),
+          React.createElement("div",{style:{flex:1,cursor:"pointer"},onClick:()=>onEdit&&onEdit(e)},React.createElement(ExpRow,{e,cats,accounts})),
           React.createElement("button",{onClick:()=>{if(confirm(`Excluir ${brl(e.total)}?`))onDelete(e.id);},style:{background:"none",border:"none",fontSize:18,padding:4,color:"#dc2626"}},"🗑️")
         ))
+      )
+    )
+  );
+}
+
+// ─── EDIT EXPENSE VIEW ────────────────────────────────────
+function EditExpenseView({expense,imports,accounts,payers,cats,matchPenalties,onSave,onUnlink,onLink,onBack,toast_}){
+  const [merchant,setMerchant]=useState(expense.merchant||"");
+  const [total,setTotal]=useState(String(expense.total||""));
+  const [date,setDate]=useState(expense.date||today());
+  const [category,setCategory]=useState(expense.category||"Outros");
+  const [payer,setPayer]=useState(expense.payer||(payers[0]||""));
+  const [splitWith,setSplitWith]=useState(expense.splitWith&&expense.splitWith.length?expense.splitWith:[expense.payer].filter(Boolean));
+  const [showRelink,setShowRelink]=useState(false);
+  
+  const linkedImp=expense.importId?imports.find(i=>i.id===expense.importId):null;
+  const linkedAcc=expense.account?accounts.find(a=>a.name===expense.account):null;
+  const isPdf=expense.driveUrl&&/\.pdf(\?|$)/i.test(expense.driveUrl);
+  
+  // Candidatos para relink
+  const candidates=useMemo(()=>{
+    const v=parseFloat((total||"0").replace(",","."));
+    if(!v||!date)return [];
+    const tempExp={merchant,total:v,date};
+    return findImportMatches(tempExp,imports.filter(i=>i.id!==expense.importId),30,matchPenalties);
+  },[merchant,total,date,imports,expense.importId,matchPenalties]);
+  
+  useEffect(()=>{if(payer&&!splitWith.includes(payer))setSplitWith(p=>[...p,payer]);},[payer]);
+  
+  const togglePerson=(p)=>{if(p===payer)return;if(splitWith.includes(p))setSplitWith(splitWith.filter(x=>x!==p));else setSplitWith([...splitWith,p]);};
+  const toggleAll=()=>{if(splitWith.length===payers.length)setSplitWith([payer]);else setSplitWith([...payers]);};
+  
+  const handleSave=async()=>{
+    const v=parseFloat((total||"0").replace(",","."));
+    if(!v){toast_("Informe o valor","err");return;}
+    if(!merchant.trim()){toast_("Informe o estabelecimento","err");return;}
+    await onSave(expense.id,{
+      merchant:merchant.trim(),total:v,date,category,payer,splitWith
+    });
+    onBack();
+  };
+  
+  const handleUnlinkLocal=async()=>{
+    if(!linkedImp)return;
+    if(!confirm(`Desvincular de "${linkedImp.title}"?\n\nO sistema vai aprender que esse comprovante não bate com esse lançamento.`))return;
+    await onUnlink(expense.id,merchant,linkedImp.title);
+  };
+  
+  const handlePickNewLink=async(newImp)=>{
+    const acc=accounts.find(a=>a.id===newImp.accountId);
+    if(!confirm(`Vincular a "${newImp.title}" (${acc?.name||"?"})?`))return;
+    // Se já tinha vínculo, desvincula primeiro (gera penalty)
+    if(linkedImp){
+      await onUnlink(expense.id,merchant,linkedImp.title);
+    }
+    await onLink(expense.id,newImp.id,acc?.name||"");
+    setShowRelink(false);
+  };
+  
+  const valorPorPessoa=parseFloat((total||"0").replace(",","."))/Math.max(1,splitWith.length);
+  
+  return React.createElement(Wrap,{pb:30},
+    React.createElement(Header,{title:"Editar gasto",onBack}),
+    React.createElement("div",{style:{padding:16}},
+      // Preview do comprovante
+      expense.driveUrl&&React.createElement("div",{style:{marginBottom:14,borderRadius:16,overflow:"hidden"}},
+        isPdf?React.createElement("a",{href:expense.driveUrl,target:"_blank",style:{display:"block",padding:24,background:"linear-gradient(135deg,#fee2e2,#fecaca)",textDecoration:"none",color:"#991b1b",fontWeight:700,textAlign:"center"}},"📄 Abrir PDF"):
+        React.createElement("a",{href:expense.driveUrl,target:"_blank"},React.createElement("img",{src:expense.driveUrl,style:{width:"100%",height:130,objectFit:"cover"}}))
+      ),
+      
+      // Vínculo bancário (em destaque)
+      React.createElement(Card,{title:"🔗 Vínculo bancário"},
+        linkedImp?React.createElement("div",null,
+          React.createElement("div",{style:{padding:12,background:"#f0fdf4",borderRadius:10,marginBottom:10,border:"1.5px solid #16a34a40"}},
+            React.createElement("div",{style:{display:"flex",alignItems:"center",gap:6,marginBottom:4}},
+              linkedAcc&&React.createElement("div",{style:{width:10,height:10,borderRadius:"50%",background:linkedAcc.color}}),
+              React.createElement("div",{style:{fontWeight:700,fontSize:13}},linkedImp.title)
+            ),
+            React.createElement("div",{style:{fontSize:11,color:"#6b7280"}},`${dtBR(linkedImp.date)} · ${linkedAcc?linkedAcc.name:expense.account||"?"} · ${brl(linkedImp.totalAmount)}`)
+          ),
+          React.createElement("div",{style:{display:"flex",gap:8}},
+            React.createElement("button",{onClick:handleUnlinkLocal,style:{flex:1,padding:10,borderRadius:10,background:"#fef3c7",color:"#92400e",border:"none",fontWeight:700,fontSize:12}},"🔓 Desvincular"),
+            React.createElement("button",{onClick:()=>setShowRelink(!showRelink),style:{flex:1,padding:10,borderRadius:10,background:"#dbeafe",color:"#1e40af",border:"none",fontWeight:700,fontSize:12}},showRelink?"✕ Cancelar":"🔄 Trocar")
+          )
+        ):React.createElement("div",null,
+          React.createElement("div",{style:{fontSize:13,color:"#6b7280",marginBottom:10}},"Sem vínculo bancário"),
+          React.createElement("button",{onClick:()=>setShowRelink(!showRelink),style:{width:"100%",padding:10,borderRadius:10,background:"#dbeafe",color:"#1e40af",border:"none",fontWeight:700,fontSize:13}},showRelink?"✕ Cancelar":"🔗 Buscar lançamento bancário")
+        ),
+        showRelink&&candidates.length===0&&React.createElement("div",{style:{marginTop:10,padding:12,background:"#f9fafb",borderRadius:10,fontSize:12,color:"#6b7280",textAlign:"center"}},"Nenhum lançamento candidato encontrado.\nAjuste estabelecimento, valor ou data."),
+        showRelink&&candidates.length>0&&React.createElement("div",{style:{marginTop:10}},
+          React.createElement("div",{style:{fontSize:11,color:"#6b7280",marginBottom:8,fontWeight:600}},`${candidates.length} candidato(s):`),
+          candidates.slice(0,5).map(({imp,score})=>{
+            const acc=accounts.find(a=>a.id===imp.accountId);
+            return React.createElement("div",{key:imp.id,onClick:()=>handlePickNewLink(imp),style:{padding:10,background:"#fff",borderRadius:10,border:"1.5px solid "+(isStrongMatch(score)?"#16a34a":"#e5e7eb"),cursor:"pointer",marginBottom:6}},
+              React.createElement("div",{style:{display:"flex",alignItems:"center",gap:6,marginBottom:2}},
+                acc&&React.createElement("div",{style:{width:8,height:8,borderRadius:"50%",background:acc.color}}),
+                React.createElement("div",{style:{fontWeight:700,fontSize:12,flex:1}},imp.title),
+                React.createElement("span",{style:{fontSize:10,padding:"1px 6px",borderRadius:6,background:isStrongMatch(score)?"#16a34a":"#9ca3af",color:"#fff",fontWeight:700}},score+"%")
+              ),
+              React.createElement("div",{style:{fontSize:10,color:"#6b7280"}},`${dtBR(imp.date)} · ${acc?acc.name:"?"} · ${brl(imp.totalAmount)}`)
+            );
+          })
+        )
+      ),
+      
+      // Dados editáveis
+      React.createElement(Card,{title:"Dados do gasto"},
+        React.createElement(Label,null,"Estabelecimento"),
+        React.createElement(InputEl,{value:merchant,onChange:setMerchant,placeholder:"Ex: Pão de Açúcar"}),
+        React.createElement(Label,null,"Valor"),
+        React.createElement(InputEl,{value:total,onChange:setTotal,placeholder:"89,90",inputMode:"decimal"}),
+        React.createElement(Label,null,"Data"),
+        React.createElement(InputEl,{value:date,onChange:setDate,type:"date"}),
+        expense.items&&expense.items.length>0&&React.createElement("div",{style:{marginTop:8,fontSize:11,color:"#6b7280"}},"📦 "+expense.items.slice(0,4).join(", "))
+      ),
+      
+      // Categoria
+      React.createElement(Card,{title:"Categoria"},
+        React.createElement("div",{style:{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8}},
+          cats.map(cat=>React.createElement("button",{key:cat.n,onClick:()=>setCategory(cat.n),style:{border:"2px solid",borderColor:category===cat.n?cat.c:"transparent",borderRadius:14,padding:"8px 4px",background:category===cat.n?cat.c+"18":"#f9f9f9",display:"flex",flexDirection:"column",alignItems:"center",gap:2}},
+            React.createElement("span",{style:{fontSize:20}},cat.i),
+            React.createElement("span",{style:{fontSize:10,fontWeight:600,color:category===cat.n?cat.c:"#374151"}},cat.n)
+          ))
+        )
+      ),
+      
+      // Pagador
+      React.createElement(Card,{title:"💳 Quem pagou?"},
+        React.createElement("div",{style:{display:"flex",gap:8,flexWrap:"wrap"}},
+          payers.map(p=>React.createElement("button",{key:p,onClick:()=>setPayer(p),style:{padding:"8px 18px",borderRadius:24,border:"2px solid",borderColor:payer===p?"#1a3a2a":"#e5e7eb",background:payer===p?"#1a3a2a":"#fff",color:payer===p?"#fff":"#374151",fontWeight:600,fontSize:14}},p))
+        )
+      ),
+      
+      // Dividir
+      React.createElement(Card,{title:"🤝 Dividir entre"},
+        React.createElement("button",{onClick:toggleAll,style:{width:"100%",padding:10,borderRadius:12,border:"none",background:splitWith.length===payers.length?"#1a3a2a":"#f3f4f6",color:splitWith.length===payers.length?"#fff":"#374151",fontWeight:700,fontSize:13,marginBottom:10}},splitWith.length===payers.length?"✓ Todos":"+ Marcar todos"),
+        React.createElement("div",{style:{display:"flex",gap:8,flexWrap:"wrap"}},
+          payers.map(p=>{const sel=splitWith.includes(p);const isPayer=p===payer;return React.createElement("button",{key:p,onClick:()=>togglePerson(p),style:{padding:"8px 14px",borderRadius:24,border:"2px solid",borderColor:sel?"#2d5a3d":"#e5e7eb",background:sel?"#2d5a3d":"#fff",color:sel?"#fff":"#374151",fontWeight:600,fontSize:13,display:"flex",alignItems:"center",gap:5,opacity:isPayer?0.85:1}},sel&&React.createElement("span",null,"✓"),p,isPayer&&React.createElement("span",{style:{fontSize:9,opacity:.8}},"💳"));})
+        ),
+        splitWith.length>1&&total&&React.createElement("div",{style:{marginTop:12,padding:10,background:"#f0fdf4",border:"1.5px solid #16a34a40",borderRadius:12,fontSize:13,color:"#166534",textAlign:"center",fontWeight:600}},`${brl(valorPorPessoa)} por pessoa`)
+      ),
+      
+      // Botões
+      React.createElement("div",{style:{display:"flex",gap:8,marginTop:14}},
+        React.createElement("button",{onClick:onBack,style:{flex:1,padding:14,borderRadius:14,background:"#f3f4f6",color:"#374151",border:"none",fontWeight:700,fontSize:14}},"Cancelar"),
+        React.createElement("button",{onClick:handleSave,style:{flex:2,padding:14,borderRadius:14,background:"linear-gradient(135deg,#1a3a2a,#2d5a3d)",color:"#fff",border:"none",fontWeight:700,fontSize:14}},"💾 Salvar alterações")
       )
     )
   );
@@ -2016,6 +2203,8 @@ function App(){
   const [cats,setCats]=useState(()=>ld("cats",DEFAULT_CATS));
   const [accounts,setAccounts]=useState(()=>ld("accounts",[]));
   const [imports,setImports]=useState(()=>ld("imports",[]));
+  const [matchPenalties,setMatchPenalties]=useState(()=>ld("matchPenalties",{}));
+  const [editingExpense,setEditingExpense]=useState(null);
   const [pendingUploads,setPendingUploads]=useState([]);
   const [uploadFolderUrl,setUploadFolderUrl]=useState("");
   const [toast,setToast]=useState(null);
@@ -2029,6 +2218,7 @@ function App(){
   useEffect(()=>sv("cats",cats),[cats]);
   useEffect(()=>sv("accounts",accounts),[accounts]);
   useEffect(()=>sv("imports",imports),[imports]);
+  useEffect(()=>sv("matchPenalties",matchPenalties),[matchPenalties]);
 
   const toast_=useCallback((msg,type="ok")=>{
     setToast({msg,type});
@@ -2054,6 +2244,7 @@ function App(){
         if(r.categories?.length)setCats(r.categories);
         setAccounts(r.accounts||[]);
         setImports(r.imports||[]);
+        setMatchPenalties(r.matchPenalties||{});
       }else throw new Error(r.error);
       await checkUploads();
     }catch(err){toast_("⚠️ "+err.message,"err");}
@@ -2088,14 +2279,47 @@ function App(){
     return e;
   };
   
-  const unlinkExpenseFn=async(expenseId)=>{
+  const unlinkExpenseFn=async(expenseId,merchant,importTitle)=>{
     const exp=expenses.find(e=>e.id===expenseId);
     if(!exp||!exp.importId)return;
     const oldImpId=exp.importId;
+    const oldImp=imports.find(i=>i.id===oldImpId);
+    const merchantToLog=merchant||exp.merchant;
+    const titleToLog=importTitle||(oldImp?oldImp.title:"");
+    
     setExpenses(p=>p.map(e=>e.id===expenseId?{...e,importId:""}:e));
     setImports(p=>p.map(i=>i.id===oldImpId?{...i,status:"pendente",expenseId:""}:i));
-    try{await api(cfg.scriptUrl,"unlinkExpense",{expenseId});toast_("✅ Desvinculado");}
-    catch(err){toast_("⚠️ "+err.message,"err");}
+    
+    // Atualiza penalty local imediatamente (otimista)
+    if(merchantToLog&&titleToLog){
+      const key=normMatchKey(merchantToLog)+"|"+normMatchKey(titleToLog);
+      setMatchPenalties(p=>({...p,[key]:(p[key]||0)+1}));
+    }
+    
+    try{
+      await api(cfg.scriptUrl,"unlinkExpense",{expenseId,merchant:merchantToLog,importTitle:titleToLog});
+      toast_("✅ Desvinculado · sistema aprendeu");
+    }catch(err){toast_("⚠️ "+err.message,"err");}
+  };
+  
+  const linkExpenseFn=async(expenseId,importId,accountName)=>{
+    setExpenses(p=>p.map(e=>e.id===expenseId?{...e,importId,account:accountName||e.account}:e));
+    setImports(p=>p.map(i=>i.id===importId?{...i,status:"vinculada",expenseId}:i));
+    try{
+      await api(cfg.scriptUrl,"linkExpense",{expenseId,importId,accountName});
+      toast_("✅ Vinculado");
+    }catch(err){toast_("⚠️ "+err.message,"err");}
+  };
+  
+  const updateExpenseFn=async(id,updates)=>{
+    setExpenses(p=>p.map(e=>e.id===id?{...e,...updates}:e));
+    if(updates.merchant&&updates.category){
+      setLmap(p=>({...p,[updates.merchant]:updates.category}));
+    }
+    try{
+      await api(cfg.scriptUrl,"updateExpense",{id,updates});
+      toast_("✅ Atualizado");
+    }catch(err){toast_("⚠️ "+err.message,"err");}
   };
   
   const saveAndReturnHome=async(exp)=>{await saveExpense(exp);setView("home");};
@@ -2108,7 +2332,7 @@ function App(){
   const deleteLearning=async(merchant)=>{setLmap(p=>{const n={...p};delete n[merchant];return n;});try{await api(cfg.scriptUrl,"deleteLearning",{merchant});}catch{}};
   const addCategory=async(cat)=>{setCats(p=>[...p,cat]);try{await api(cfg.scriptUrl,"addCategory",{category:cat});toast_("✅ Categoria criada!");}catch(err){toast_("⚠️ Local","err");}};
   const deleteCategory=async(name)=>{setCats(p=>p.filter(c=>c.n!==name));try{await api(cfg.scriptUrl,"deleteCategory",{name});toast_("✅ Removida");}catch{}};
-  const changeUrl=(newUrl)=>{if(!newUrl?.trim())return;setCfg({scriptUrl:newUrl.trim()});setExpenses([]);setLmap({});setPayers(["Eu"]);setCats(DEFAULT_CATS);setAccounts([]);setImports([]);toast_("🔄 URL atualizada!");};
+  const changeUrl=(newUrl)=>{if(!newUrl?.trim())return;setCfg({scriptUrl:newUrl.trim()});setExpenses([]);setLmap({});setPayers(["Eu"]);setCats(DEFAULT_CATS);setAccounts([]);setImports([]);setMatchPenalties({});toast_("🔄 URL atualizada!");};
 
   // ─── ACCOUNTS / IMPORTS ─────────────────────────────
   const addAccount=async(acc)=>{
@@ -2123,10 +2347,10 @@ function App(){
   };
   const uploadCsv=async(items)=>{
     try{
-      // Auto-vincula matches fortes ANTES de mandar
+      // Auto-vincula matches fortes ANTES de mandar (com penalties)
       const enrichedItems=items.map(it=>{
         if(it.status!=="pendente")return it;
-        const matches=findExpenseMatches(it,expenses,85); // só matches fortes
+        const matches=findExpenseMatches(it,expenses,80,matchPenalties); // só matches fortes
         if(matches.length>0){
           // Auto-vincula
           return {...it,_autoLinkExpenseId:matches[0].exp.id};
@@ -2190,10 +2414,11 @@ function App(){
   if(!cfg.scriptUrl)return React.createElement(React.Fragment,null,toast&&React.createElement(Toast,{t:toast}),React.createElement(SetupView,{toast_,onSave:url=>setCfg({scriptUrl:url})}));
   const RouteWrap=({children})=>React.createElement(React.Fragment,null,toast&&React.createElement(Toast,{t:toast}),children);
 
-  if(view==="localfiles")return React.createElement(RouteWrap,null,React.createElement(LocalFileProcessor,{files:localFiles,payers,lmap,cats,apiKey,imports,accounts,onSave:saveExpense,onSaveLinked:saveLinkedExpense,onFinish:()=>{setView("home");toast_("✅ Concluído!");},toast_}));
-  if(view==="capture")return React.createElement(RouteWrap,null,React.createElement(CaptureView,{payers,lmap,cats,apiKey,imports,accounts,onSave:saveAndReturnHome,onSaveLinked:saveLinkedAndReturnHome,onBack:()=>setView("home"),toast_}));
+  if(view==="localfiles")return React.createElement(RouteWrap,null,React.createElement(LocalFileProcessor,{files:localFiles,payers,lmap,cats,apiKey,imports,accounts,matchPenalties,onSave:saveExpense,onSaveLinked:saveLinkedExpense,onFinish:()=>{setView("home");toast_("✅ Concluído!");},toast_}));
+  if(view==="capture")return React.createElement(RouteWrap,null,React.createElement(CaptureView,{payers,lmap,cats,apiKey,imports,accounts,matchPenalties,onSave:saveAndReturnHome,onSaveLinked:saveLinkedAndReturnHome,onBack:()=>setView("home"),toast_}));
   if(view==="upload")return React.createElement(RouteWrap,null,React.createElement(UploadProcessor,{uploads:pendingUploads,payers,lmap,cats,apiKey,scriptUrl:cfg.scriptUrl,onSave:saveExpense,onDeleteUpload:deleteUploadFile,onFinish:finishUploadProcessing,toast_}));
-  if(view==="history")return React.createElement(RouteWrap,null,React.createElement(HistoryView,{expenses,cats,accounts,onBack:()=>setView("home"),onDelete:deleteExpense,onUnlink:unlinkExpenseFn}));
+  if(view==="history")return React.createElement(RouteWrap,null,React.createElement(HistoryView,{expenses,cats,accounts,onBack:()=>setView("home"),onDelete:deleteExpense,onUnlink:unlinkExpenseFn,onEdit:e=>{setEditingExpense(e);setView("editExpense");}}));
+  if(view==="editExpense"&&editingExpense)return React.createElement(RouteWrap,null,React.createElement(EditExpenseView,{expense:editingExpense,imports,accounts,payers,cats,matchPenalties,onSave:updateExpenseFn,onUnlink:unlinkExpenseFn,onLink:linkExpenseFn,onBack:()=>{setEditingExpense(null);setView("history");},toast_}));
   if(view==="dashboard")return React.createElement(RouteWrap,null,React.createElement(DashboardView,{expenses,cats,payers,accounts,onBack:()=>setView("home")}));
   if(view==="import")return React.createElement(RouteWrap,null,React.createElement(ImportView,{accounts,imports,expenses,cats,payers,lmap,scriptUrl:cfg.scriptUrl,onAddAccount:addAccount,onDeleteAccount:deleteAccountFn,onUploadCsv:uploadCsv,onUpdateImport:updateImport,onDeleteImport:deleteImportFn,onLaunchImports:launchImports,onBack:()=>setView("home"),toast_}));
   if(view==="settings")return React.createElement(RouteWrap,null,React.createElement(SettingsView,{payers,cfg,lmap,cats,apiKey,setApiKey,uploadFolderUrl,onAddPayer:addPayer,onDeletePayer:deletePayer,onChangeUrl:changeUrl,onDeleteLearning:deleteLearning,onAddCategory:addCategory,onDeleteCategory:deleteCategory,onBack:()=>setView("home"),toast_,onRefresh:syncDown,syncing}));
