@@ -2465,7 +2465,7 @@ function HistoryView({expenses,cats,accounts,onBack,onDelete,onUnlink,onEdit}){
 }
 
 // ─── EDIT EXPENSE VIEW ────────────────────────────────────
-function EditExpenseView({expense,imports,accounts,payers,cats,matchPenalties,allExpenses,onSave,onUnlink,onLink,onBulkUpdateCategory,onBack,toast_}){
+function EditExpenseView({expense,imports,accounts,payers,cats,matchPenalties,allExpenses,onSave,onUnlink,onLink,onBulkUpdateCategory,onBulkUpdateSplit,onBack,toast_}){
   const [merchant,setMerchant]=useState(expense.merchant||"");
   const [total,setTotal]=useState(String(expense.total||""));
   const [date,setDate]=useState(expense.date||today());
@@ -2524,7 +2524,47 @@ function EditExpenseView({expense,imports,accounts,payers,cats,matchPenalties,al
         }
       }
     }
-    
+
+    // Se mudou o splitWith, oferece opções de aplicar em lote
+    const splitChanged=JSON.stringify([...splitWith].sort())!==JSON.stringify([...(expense.splitWith||[])].sort());
+    if(splitChanged&&onBulkUpdateSplit){
+      const normName=s=>(s||"").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/\b(ltda|me|eireli|sa|s\/a|epp|mei|comercio|comercial|loja|restaurante|mercado)\b/g,"").replace(/[^a-z0-9 ]/g," ").replace(/\s+/g," ").trim();
+      const norm=normName(merchant);
+      const splitLabel=splitWith.join(", ");
+
+      // Por conta + pagador (mais específico)
+      const byAccount=(allExpenses||[]).filter(e=>
+        e.id!==expense.id&&
+        normName(e.merchant)===norm&&
+        e.payer===payer&&
+        e.account===expense.account&&
+        JSON.stringify([...(e.splitWith||[])].sort())!==JSON.stringify([...splitWith].sort())
+      );
+
+      // Por fornecedor + pagador (mais amplo)
+      const byMerchant=(allExpenses||[]).filter(e=>
+        e.id!==expense.id&&
+        normName(e.merchant)===norm&&
+        e.payer===payer&&
+        JSON.stringify([...(e.splitWith||[])].sort())!==JSON.stringify([...splitWith].sort())
+      );
+
+      if(byMerchant.length>0){
+        const oldSplit=(expense.splitWith||[payer]).join(", ");
+        let msg=`Você alterou o rateio de "${merchant.trim()}"\nde [${oldSplit}] → [${splitLabel}]\n\nDeseja aplicar para outros lançamentos?\n\n`;
+        msg+=`[ 1 ] Só este\n`;
+        if(byAccount.length>0)msg+=`[ 2 ] Mesma conta (${expense.account||payer}) — ${byAccount.length} lançamento(s)\n`;
+        msg+=`[ 3 ] Todos do fornecedor com pagador ${payer} — ${byMerchant.length} lançamento(s)`;
+
+        const choice=prompt(msg+"\n\nDigite 1, 2 ou 3:");
+        if(choice==="2"&&byAccount.length>0){
+          await onBulkUpdateSplit(byAccount.map(e=>e.id),splitWith,payer);
+        }else if(choice==="3"){
+          await onBulkUpdateSplit(byMerchant.map(e=>e.id),splitWith,payer);
+        }
+      }
+    }
+
     onBack();
   };
   
@@ -2956,6 +2996,19 @@ function App(){
     toast_(`✅ ${updated} lançamento(s) atualizados para "${category}"`);
   };
   
+  const bulkUpdateSplitFn=async(ids,splitWith,payer)=>{
+    if(!ids||ids.length===0)return;
+    setExpenses(p=>p.map(e=>ids.includes(e.id)?{...e,splitWith,payer}:e));
+    let updated=0;
+    for(const id of ids){
+      try{
+        await api(cfg.scriptUrl,"updateExpense",{id,updates:{splitWith,payer}});
+        updated++;
+      }catch{}
+    }
+    toast_(`✅ ${updated} lançamento(s) atualizados`);
+  };
+
   const resetDataFn=async()=>{
     if(!confirm("⚠️ ATENÇÃO\n\nIsso vai apagar:\n• TODAS as despesas\n• TODAS as importações pendentes\n• Aprendizado de vínculos bancários\n\nMantém: pessoas, categorias, contas e aprendizado de categorias.\n\nEsta ação NÃO pode ser desfeita.\n\nTem certeza?"))return;
     if(!confirm("Última confirmação: tem certeza absoluta?"))return;
@@ -3178,7 +3231,7 @@ function App(){
   if(view==="capture")return React.createElement(React.Fragment,null,toastSlot,React.createElement(CaptureView,{payers,lmap,cats,apiKey,imports,accounts,matchPenalties,onSave:saveAndReturnHome,onSaveLinked:saveLinkedAndReturnHome,onBack:()=>setView("home"),toast_}));
   if(view==="upload")return React.createElement(React.Fragment,null,toastSlot,React.createElement(BulkUploadProcessor,{key:"bulk-uploader",uploads:pendingUploads,expensesAll:expenses,payers,lmap,cats,apiKey,scriptUrl:cfg.scriptUrl,imports,accounts,matchPenalties,onSaveBulk:saveBulkExpense,onDeleteUpload:deleteUploadFile,onMoveToErrors:moveToErrorsFn,onFinish:()=>{checkUploads();syncDown();setView("history");},toast_}));
   if(view==="history")return React.createElement(React.Fragment,null,toastSlot,React.createElement(HistoryView,{expenses,cats,accounts,onBack:()=>setView("home"),onDelete:deleteExpense,onUnlink:unlinkExpenseFn,onEdit:e=>{setEditingExpense(e);setView("editExpense");}}));
-  if(view==="editExpense"&&editingExpense)return React.createElement(React.Fragment,null,toastSlot,React.createElement(EditExpenseView,{expense:editingExpense,imports,accounts,payers,cats,matchPenalties,allExpenses:expenses,onSave:updateExpenseFn,onUnlink:unlinkExpenseFn,onLink:linkExpenseFn,onBulkUpdateCategory:bulkUpdateCategoryFn,onBack:()=>{setEditingExpense(null);setView("history");},toast_}));
+  if(view==="editExpense"&&editingExpense)return React.createElement(React.Fragment,null,toastSlot,React.createElement(EditExpenseView,{expense:editingExpense,imports,accounts,payers,cats,matchPenalties,allExpenses:expenses,onSave:updateExpenseFn,onUnlink:unlinkExpenseFn,onLink:linkExpenseFn,onBulkUpdateCategory:bulkUpdateCategoryFn,onBulkUpdateSplit:bulkUpdateSplitFn,onBack:()=>{setEditingExpense(null);setView("history");},toast_}));
   if(view==="dashboard")return React.createElement(React.Fragment,null,toastSlot,React.createElement(DashboardView,{expenses,cats,payers,accounts,onBack:()=>setView("home")}));
   if(view==="import")return React.createElement(React.Fragment,null,toastSlot,React.createElement(ImportView,{accounts,imports,expenses,cats,payers,lmap,scriptUrl:cfg.scriptUrl,onAddAccount:addAccount,onDeleteAccount:deleteAccountFn,onUploadCsv:uploadCsv,onUpdateImport:updateImport,onDeleteImport:deleteImportFn,onLaunchImports:launchImports,onDeleteSession:deleteSessionFn,onBack:()=>setView("home"),toast_}));
   if(view==="settings")return React.createElement(React.Fragment,null,toastSlot,React.createElement(SettingsView,{payers,cfg,lmap,cats,apiKey,setApiKey,uploadFolderUrl,onAddPayer:addPayer,onDeletePayer:deletePayer,onChangeUrl:changeUrl,onDeleteLearning:deleteLearning,onAddCategory:addCategory,onDeleteCategory:deleteCategory,onResetData:resetDataFn,onCleanupDuplicates:cleanupDuplicatesFn,onFixPayers:fixPayersFn,onBack:()=>setView("home"),toast_,onRefresh:syncDown,syncing}));
