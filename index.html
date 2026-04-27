@@ -125,12 +125,53 @@ async function callClaude(b64,mimeType,lmap,cats,apiKey){
   const res=await fetch("https://api.anthropic.com/v1/messages",{
     method:"POST",
     headers:{"Content-Type":"application/json","x-api-key":apiKey,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
-    body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:800,messages:[{role:"user",content:[contentBlock,{type:"text",text:`Analise o comprovante e retorne APENAS JSON:\n{"merchant":"nome","total":0.00,"date":"YYYY-MM-DD","category":"cat","items":[]}\n\nCategorias: ${cats.map(c=>c.n).join(", ")}\n${hints?`\nAprendizado: ${hints}`:""}`}]}]})
+    body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:2000,messages:[{role:"user",content:[contentBlock,{type:"text",text:`Analise o comprovante e retorne APENAS JSON:\n{"merchant":"nome","total":0.00,"date":"YYYY-MM-DD","category":"cat","items":["até 5 principais"]}\n\nNo campo "items" liste no MÁXIMO 5 itens principais (mais caros ou mais quantidade). Use nomes curtos.\n\nCategorias disponíveis: ${cats.map(c=>c.n).join(", ")}\n${hints?`\nAprendizado: ${hints}`:""}`}]}]})
   });
   if(!res.ok){const e=await res.text();throw new Error("API "+res.status+": "+e.slice(0,150));}
   const d=await res.json();
   const t=d.content?.find(b=>b.type==="text")?.text||"{}";
-  return JSON.parse(t.replace(/```\w*\n?|\n?```/g,"").trim());
+  const cleaned=t.replace(/```\w*\n?|\n?```/g,"").trim();
+  return safeJsonParse(cleaned);
+}
+
+// Tenta parsear JSON; se vier cortado/quebrado, tenta recuperar
+function safeJsonParse(s){
+  try{return JSON.parse(s);}catch(err){
+    // Tenta recuperar JSON truncado
+    let attempt=s.trim();
+    
+    // Se tem string aberta sem fechar, fecha aspas
+    const quotes=(attempt.match(/"/g)||[]).length;
+    if(quotes%2===1)attempt+='"';
+    
+    // Se tem array aberto sem fechar
+    const openBrackets=(attempt.match(/\[/g)||[]).length;
+    const closeBrackets=(attempt.match(/\]/g)||[]).length;
+    for(let i=0;i<openBrackets-closeBrackets;i++)attempt+=']';
+    
+    // Se tem objeto aberto sem fechar
+    const openBraces=(attempt.match(/\{/g)||[]).length;
+    const closeBraces=(attempt.match(/\}/g)||[]).length;
+    for(let i=0;i<openBraces-closeBraces;i++)attempt+='}';
+    
+    try{return JSON.parse(attempt);}catch(err2){
+      // Ainda falhou — tenta extrair só os campos básicos com regex
+      const merchant=s.match(/"merchant"\s*:\s*"([^"]*)"/);
+      const total=s.match(/"total"\s*:\s*([\d.]+)/);
+      const date=s.match(/"date"\s*:\s*"([^"]*)"/);
+      const category=s.match(/"category"\s*:\s*"([^"]*)"/);
+      if(merchant||total||date){
+        return {
+          merchant:merchant?merchant[1]:"",
+          total:total?parseFloat(total[1]):0,
+          date:date?date[1]:"",
+          category:category?category[1]:"",
+          items:[]
+        };
+      }
+      throw new Error("Resposta da IA inválida (tente novamente)");
+    }
+  }
 }
 
 async function suggestEmojis(name,apiKey){
