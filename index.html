@@ -1282,7 +1282,7 @@ const MatchSuggestion=({matches,accounts,onSelect,onSkip,title="🔗 Encontramos
 };
 
 // ─── IMPORT VIEW ─────────────────────────────────────────────
-function ImportView({accounts,imports,expenses,cats,payers,lmap,scriptUrl,onAddAccount,onDeleteAccount,onUploadCsv,onUpdateImport,onDeleteImport,onLaunchImports,onDeleteSession,onBack,toast_}){
+function ImportView({accounts,imports,expenses,cats,payers,lmap,scriptUrl,onAddAccount,onDeleteAccount,onUploadCsv,onUpdateImport,onDeleteImport,onDeleteExpense,onLaunchImports,onDeleteSession,onBack,toast_}){
   const [tab,setTab]=useState("list");
   const [selectedAccount,setSelectedAccount]=useState("all");
   const [filterStatus,setFilterStatus]=useState("pendente");
@@ -1369,6 +1369,13 @@ function ImportView({accounts,imports,expenses,cats,payers,lmap,scriptUrl,onAddA
   };
   const setCategoryFor=async(id,category)=>{
     await onUpdateImport(id,{category});
+  };
+  const reverseOne=async(imp)=>{
+    if(!confirm(`Estornar lançamento de "${imp.title}"?\n\nIsso vai:\n• Apagar a despesa criada\n• Voltar esta importação para "Pendente"\n\nTem certeza?`))return;
+    // Apaga a despesa vinculada (se existir)
+    if(imp.expenseId&&onDeleteExpense)await onDeleteExpense(imp.expenseId);
+    // Volta para pendente
+    await onUpdateImport(imp.id,{status:"pendente",expenseId:""});
   };
 
   // ─── RENDER ──────────────────────────────────────────
@@ -1482,6 +1489,8 @@ function ImportView({accounts,imports,expenses,cats,payers,lmap,scriptUrl,onAddA
                     React.createElement("div",{style:{display:"flex",gap:4,justifyContent:"center",flexWrap:"wrap"}},
                       imp.status==="pendente"&&React.createElement("button",{onClick:()=>launchOne(imp),disabled:busy||!sugCat,style:{padding:"5px 8px",borderRadius:8,border:"none",background:sugCat?"#16a34a":"#e5e7eb",color:sugCat?"#fff":"#9ca3af",fontSize:11,fontWeight:700,cursor:sugCat?"pointer":"not-allowed"}},"✓ Lançar"),
                       imp.status==="pendente"&&React.createElement("button",{onClick:()=>setStatus(imp.id,"ignorada"),style:{padding:"5px 8px",borderRadius:8,border:"none",background:"#f3f4f6",color:"#6b7280",fontSize:11,fontWeight:600,cursor:"pointer"}},"🔇 Ignorar"),
+                      imp.status==="lancada"&&React.createElement("button",{onClick:()=>reverseOne(imp),style:{padding:"5px 8px",borderRadius:8,border:"none",background:"#fee2e2",color:"#dc2626",fontSize:11,fontWeight:700,cursor:"pointer"}},"↩️ Estornar"),
+                      imp.status==="ignorada"&&React.createElement("button",{onClick:()=>setStatus(imp.id,"pendente"),style:{padding:"5px 8px",borderRadius:8,border:"none",background:"#f3f4f6",color:"#2563eb",fontSize:11,fontWeight:600,cursor:"pointer"}},"↩️ Reativar"),
                       imp.status==="ignorada"&&React.createElement("button",{onClick:()=>setStatus(imp.id,"pendente"),style:{padding:"5px 8px",borderRadius:8,border:"none",background:"#dbeafe",color:"#1e40af",fontSize:11,fontWeight:600,cursor:"pointer"}},"↩️ Reativar"),
                       React.createElement("button",{onClick:()=>{if(confirm("Excluir da lista? (não afeta a despesa lançada)"))onDeleteImport(imp.id);},style:{padding:"5px 8px",borderRadius:8,border:"none",background:"transparent",color:"#dc2626",fontSize:13,cursor:"pointer"}},"🗑️")
                     )
@@ -2134,57 +2143,76 @@ function SetupView({onSave,toast_}){
   );
 }
 
-function CaptureView({payers,lmap,cats,apiKey,imports,accounts,matchPenalties,onSave,onSaveLinked,onBack,toast_}){
+function CaptureView({payers,lmap,cats,apiKey,imports,accounts,matchPenalties,expenses,onSave,onSaveLinked,onAttachReceipt,onBack,toast_}){
   const [stage,setStage]=useState("pick");const [imageUrl,setImageUrl]=useState(null);const [b64,setB64]=useState(null);
   const [result,setResult]=useState({merchant:"",total:"",date:today(),category:"Outros",items:[]});
   const [payer,setPayer]=useState(payers[0]||"Eu");const [splitWith,setSplitWith]=useState([...payers]);
   const [matches,setMatches]=useState([]);
   const [pendingExp,setPendingExp]=useState(null);
+  const [duplicateExp,setDuplicateExp]=useState(null); // despesa já lançada que pode ser este comprovante
   const fileRef=useRef();
+
+  const normM=s=>(s||"").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/[^a-z0-9]/g," ").replace(/\s+/g," ").trim();
+
+  const findDuplicate=(merchant,total,date)=>{
+    if(!merchant||!total||!date)return null;
+    const norm=normM(merchant);
+    const v=Number(total)||0;
+    return (expenses||[]).find(e=>{
+      if(Math.abs(Number(e.total)-v)>0.01)return false;
+      if(e.date!==date)return false;
+      return normM(e.merchant)===norm;
+    })||null;
+  };
+
   const handleFile=async(file)=>{
     if(!file)return;if(!apiKey){toast_("⚠️ Configure a chave em ⚙️","err");return;}
     setImageUrl(URL.createObjectURL(file));setStage("analyzing");
     try{const img=await compress(file);setB64(img);
       const r=await callClaude(img,"image/jpeg",lmap,cats,apiKey);
-      setResult({merchant:r.merchant||"",total:r.total!=null?String(r.total):"",date:r.date||today(),category:cats.find(c=>c.n===r.category)?.n||cats[0]?.n||"Outros",items:r.items||[]});
-      setStage("review");
+      const analyzed={merchant:r.merchant||"",total:r.total!=null?String(r.total):"",date:r.date||today(),category:cats.find(c=>c.n===r.category)?.n||cats[0]?.n||"Outros",items:r.items||[]};
+      setResult(analyzed);
+      // Verifica se já existe despesa com esse dado
+      const dup=findDuplicate(r.merchant,r.total,r.date||today());
+      if(dup){setDuplicateExp(dup);setStage("duplicate");}
+      else setStage("review");
     }catch(err){toast_("⚠️ "+err.message,"err");setStage("manual");}
   };
   const handleSave=async()=>{
     const v=parseFloat((result.total||"0").replace(",","."));
     if(!v){toast_("Informe o valor","err");return;}
     if(splitWith.length===0){toast_("Selecione quem divide","err");return;}
-    
-    // Auto-link: busca match e vincula automaticamente se houver
     const tempExp={merchant:result.merchant,total:v,date:result.date};
     const found=findImportMatches(tempExp,imports||[],50,matchPenalties);
-    
     setStage("saving");
     if(found.length>0){
-      // Auto-vincula com o melhor match
       const bestImp=found[0].imp;
       const acc=accounts?.find(a=>a.id===bestImp.accountId);
-      await onSaveLinked({
-        ...result,total:v,payer,splitWith,
-        imageBase64:b64,mimeType:"image/jpeg",
-        account:acc?.name||"",importId:bestImp.id
-      },bestImp.id);
+      await onSaveLinked({...result,total:v,payer,splitWith,imageBase64:b64,mimeType:"image/jpeg",account:acc?.name||"",importId:bestImp.id},bestImp.id);
     }else{
       await onSave({...result,total:v,payer,splitWith,imageBase64:b64,mimeType:"image/jpeg"});
     }
   };
-  
   const handleLinkMatch=async(imp)=>{
     setStage("saving");
     const acc=accounts?.find(a=>a.id===imp.accountId);
-    // Salva expense e cria vínculo
     const expWithLink={...pendingExp,account:acc?.name||"",importId:imp.id,payer:acc?.payer||pendingExp.payer};
     await onSaveLinked(expWithLink,imp.id);
   };
-  const handleSkipMatch=async()=>{
+  const handleSkipMatch=async()=>{setStage("saving");await onSave(pendingExp);};
+
+  // Anexa comprovante a despesa já existente (sem criar nova despesa)
+  const handleAttachToExisting=async()=>{
+    if(!duplicateExp)return;
     setStage("saving");
-    await onSave(pendingExp);
+    try{
+      // Upload da foto no Drive (via Apps Script)
+      if(onAttachReceipt)await onAttachReceipt(duplicateExp.id,b64,"image/jpeg",result.merchant,result.date);
+      toast_("✅ Comprovante anexado ao gasto existente!");
+    }catch(err){toast_("⚠️ "+err.message,"err");}
+    onBack();
   };
+
   if(stage==="pick")return React.createElement(Wrap,{pb:20},React.createElement(Header,{title:"Novo gasto",onBack}),
     React.createElement("div",{style:{padding:16}},
       !apiKey&&React.createElement("div",{style:{background:"#fef3c7",border:"1.5px solid #f59e0b",borderRadius:14,padding:12,marginBottom:14,fontSize:12,color:"#78350f"}},"⚠️ Configure a chave da Anthropic em ⚙️ para usar IA."),
@@ -2205,6 +2233,36 @@ function CaptureView({payers,lmap,cats,apiKey,imports,accounts,matchPenalties,on
   if(stage==="saving")return React.createElement(Wrap,{pb:20},React.createElement(Header,{title:"Salvando..."}),
     React.createElement("div",{style:{display:"flex",flexDirection:"column",alignItems:"center",padding:60,gap:20}},React.createElement(Spinner,{size:48,color:"#2d5a3d"}))
   );
+
+  // Tela de duplicata detectada
+  if(stage==="duplicate"&&duplicateExp)return React.createElement(Wrap,{pb:20},
+    React.createElement(Header,{title:"Gasto já existe",onBack}),
+    React.createElement("div",{style:{padding:16}},
+      imageUrl&&React.createElement("img",{src:imageUrl,style:{width:"100%",maxHeight:180,objectFit:"cover",borderRadius:16,marginBottom:16}}),
+      React.createElement(Card,{style:{borderLeft:"4px solid #f59e0b"}},
+        React.createElement("div",{style:{fontSize:13,color:"#92400e",fontWeight:700,marginBottom:8}},"⚠️ Esse comprovante parece ser de um gasto já lançado:"),
+        React.createElement("div",{style:{background:"#fef3c7",borderRadius:12,padding:12}},
+          React.createElement("div",{style:{fontWeight:700,fontSize:15}},duplicateExp.merchant),
+          React.createElement("div",{style:{fontSize:13,color:"#6b7280",marginTop:2}},
+            brl(duplicateExp.total)+" · "+new Date(duplicateExp.date+"T12:00").toLocaleDateString("pt-BR")+(duplicateExp.account?" · "+duplicateExp.account:"")
+          ),
+          duplicateExp.receiptUrl&&React.createElement("div",{style:{fontSize:11,color:"#16a34a",marginTop:4}},"✅ Já tem comprovante anexado"),
+          !duplicateExp.receiptUrl&&React.createElement("div",{style:{fontSize:11,color:"#d97706",marginTop:4}},"📎 Sem comprovante ainda")
+        )
+      ),
+      React.createElement("div",{style:{display:"flex",flexDirection:"column",gap:10,marginTop:8}},
+        React.createElement("button",{
+          onClick:handleAttachToExisting,
+          style:{padding:"16px 20px",borderRadius:16,border:"none",background:"#16a34a",color:"#fff",fontWeight:700,fontSize:15}
+        },"📎 Anexar ao gasto existente"),
+        React.createElement("button",{
+          onClick:()=>setStage("review"),
+          style:{padding:"14px 20px",borderRadius:16,border:"2px solid #e5e7eb",background:"#fff",fontWeight:600,fontSize:14,color:"#374151"}
+        },"➕ Criar gasto novo mesmo assim")
+      )
+    )
+  );
+
   return React.createElement(Wrap,{pb:20},React.createElement(Header,{title:"Revisar dados",onBack}),
     React.createElement(ReviewForm,{imageUrl,result,setResult,payer,setPayer,splitWith,setSplitWith,payers,cats,onSave:handleSave})
   );
@@ -3476,6 +3534,18 @@ function App(){
   const saveAndReturnHome=async(exp)=>{await saveExpense(exp);setView("home");};
   const saveLinkedAndReturnHome=async(exp,importId)=>{await saveLinkedExpense(exp,importId);setView("home");};
 
+  // Anexa comprovante (foto) a uma despesa já existente sem criar nova
+  const attachReceiptFn=async(expenseId,base64,mimeType,merchant,date)=>{
+    if(!base64||!cfg.scriptUrl)return;
+    try{
+      const dr=await api(cfg.scriptUrl,"uploadReceipt",{base64,mimeType:mimeType||"image/jpeg",merchant,date});
+      if(dr.ok&&dr.driveUrl){
+        await sbUpdateExpense(expenseId,{receiptUrl:dr.driveUrl,driveFileId:dr.fileId,reviewed:true});
+        setExpenses(p=>p.map(e=>e.id===expenseId?{...e,receiptUrl:dr.driveUrl,driveFileId:dr.fileId,reviewed:true}:e));
+      }
+    }catch(err){toast_("⚠️ "+err.message,"err");}
+  };
+
   const saveBulkExpense=async(exp,importId)=>{
     const e={...exp,id:"exp_"+Date.now()+"_"+Math.floor(Math.random()*9999),at:new Date().toISOString(),reviewed:false};
     setExpenses(p=>[e,...p]);
@@ -3705,12 +3775,12 @@ function App(){
   const toastSlot=React.createElement("div",{key:"toast-slot",style:{position:"fixed",top:0,left:0,right:0,zIndex:9999,pointerEvents:"none"}},toast&&React.createElement(Toast,{t:toast}));
 
   if(view==="localfiles")return React.createElement(React.Fragment,null,toastSlot,React.createElement(LocalFileProcessor,{files:localFiles,payers,lmap,cats,apiKey,imports,accounts,matchPenalties,onSave:saveExpense,onSaveLinked:saveLinkedExpense,onFinish:()=>{setView("home");toast_("✅ Concluído!");},toast_}));
-  if(view==="capture")return React.createElement(React.Fragment,null,toastSlot,React.createElement(CaptureView,{payers,lmap,cats,apiKey,imports,accounts,matchPenalties,onSave:saveAndReturnHome,onSaveLinked:saveLinkedAndReturnHome,onBack:()=>setView("home"),toast_}));
+  if(view==="capture")return React.createElement(React.Fragment,null,toastSlot,React.createElement(CaptureView,{payers,lmap,cats,apiKey,imports,accounts,matchPenalties,expenses,onSave:saveAndReturnHome,onSaveLinked:saveLinkedAndReturnHome,onAttachReceipt:attachReceiptFn,onBack:()=>setView("home"),toast_}));
   if(view==="upload")return React.createElement(React.Fragment,null,toastSlot,React.createElement(BulkUploadProcessor,{key:"bulk-uploader",uploads:pendingUploads,expensesAll:expenses,payers,lmap,cats,apiKey,scriptUrl:cfg.scriptUrl,imports,accounts,matchPenalties,onSaveBulk:saveBulkExpense,onDeleteUpload:deleteUploadFile,onMoveToErrors:moveToErrorsFn,onFinish:()=>{checkUploads();syncDown();setView("history");},toast_}));
   if(view==="history")return React.createElement(React.Fragment,null,toastSlot,React.createElement(HistoryView,{expenses,cats,accounts,onBack:()=>setView("home"),onDelete:deleteExpense,onUnlink:unlinkExpenseFn,onEdit:e=>{setEditingExpense(e);setView("editExpense");}}));
   if(view==="editExpense"&&editingExpense)return React.createElement(React.Fragment,null,toastSlot,React.createElement(EditExpenseView,{expense:editingExpense,imports,accounts,payers,cats,matchPenalties,allExpenses:expenses,onSave:updateExpenseFn,onUnlink:unlinkExpenseFn,onLink:linkExpenseFn,onBulkUpdateCategory:bulkUpdateCategoryFn,onBulkUpdateSplit:bulkUpdateSplitFn,onBack:()=>{setEditingExpense(null);setView("history");},toast_}));
   if(view==="dashboard")return React.createElement(React.Fragment,null,toastSlot,React.createElement(DashboardView,{expenses,cats,payers,accounts,onBack:()=>setView("home")}));
-  if(view==="import")return React.createElement(React.Fragment,null,toastSlot,React.createElement(ImportView,{accounts,imports,expenses,cats,payers,lmap,scriptUrl:cfg.scriptUrl,onAddAccount:addAccount,onDeleteAccount:deleteAccountFn,onUploadCsv:uploadCsv,onUpdateImport:updateImport,onDeleteImport:deleteImportFn,onLaunchImports:launchImports,onDeleteSession:deleteSessionFn,onBack:()=>setView("home"),toast_}));
+  if(view==="import")return React.createElement(React.Fragment,null,toastSlot,React.createElement(ImportView,{accounts,imports,expenses,cats,payers,lmap,scriptUrl:cfg.scriptUrl,onAddAccount:addAccount,onDeleteAccount:deleteAccountFn,onUploadCsv:uploadCsv,onUpdateImport:updateImport,onDeleteImport:deleteImportFn,onDeleteExpense:deleteExpense,onLaunchImports:launchImports,onDeleteSession:deleteSessionFn,onBack:()=>setView("home"),toast_}));
   if(view==="settings")return React.createElement(React.Fragment,null,toastSlot,React.createElement(SettingsView,{payers,cfg,lmap,cats,apiKey,setApiKey,uploadFolderUrl,onAddPayer:addPayer,onDeletePayer:deletePayer,onChangeUrl:changeUrl,onDeleteLearning:deleteLearning,onAddCategory:addCategory,onDeleteCategory:deleteCategory,onResetData:resetDataFn,onCleanupDuplicates:cleanupDuplicatesFn,onFixPayers:fixPayersFn,onBack:()=>setView("home"),toast_,onRefresh:syncDown,syncing}));
 
   // HOME
