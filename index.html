@@ -3138,19 +3138,18 @@ function App(){
   };
 
   if(!cfg.scriptUrl)return React.createElement(React.Fragment,null,toast&&React.createElement(Toast,{t:toast}),React.createElement(SetupView,{toast_,onSave:url=>setCfg({scriptUrl:url})}));
-  const RouteWrap=({children})=>React.createElement(React.Fragment,null,
-    React.createElement("div",{key:"toast-slot"},toast&&React.createElement(Toast,{t:toast})),
-    React.createElement("div",{key:"main-content"},children)
-  );
+  
+  // Toast slot fixo, sempre presente, fora dos routes
+  const toastSlot=React.createElement("div",{key:"toast-slot",style:{position:"fixed",top:0,left:0,right:0,zIndex:9999,pointerEvents:"none"}},toast&&React.createElement(Toast,{t:toast}));
 
-  if(view==="localfiles")return React.createElement(RouteWrap,null,React.createElement(LocalFileProcessor,{files:localFiles,payers,lmap,cats,apiKey,imports,accounts,matchPenalties,onSave:saveExpense,onSaveLinked:saveLinkedExpense,onFinish:()=>{setView("home");toast_("✅ Concluído!");},toast_}));
-  if(view==="capture")return React.createElement(RouteWrap,null,React.createElement(CaptureView,{payers,lmap,cats,apiKey,imports,accounts,matchPenalties,onSave:saveAndReturnHome,onSaveLinked:saveLinkedAndReturnHome,onBack:()=>setView("home"),toast_}));
-  if(view==="upload")return React.createElement(RouteWrap,null,React.createElement(BulkUploadProcessor,{key:"bulk-uploader",uploads:pendingUploads,expensesAll:expenses,payers,lmap,cats,apiKey,scriptUrl:cfg.scriptUrl,imports,accounts,matchPenalties,onSaveBulk:saveBulkExpense,onDeleteUpload:deleteUploadFile,onMoveToErrors:moveToErrorsFn,onFinish:()=>{checkUploads();syncDown();setView("history");},toast_}));
-  if(view==="history")return React.createElement(RouteWrap,null,React.createElement(HistoryView,{expenses,cats,accounts,onBack:()=>setView("home"),onDelete:deleteExpense,onUnlink:unlinkExpenseFn,onEdit:e=>{setEditingExpense(e);setView("editExpense");}}));
-  if(view==="editExpense"&&editingExpense)return React.createElement(RouteWrap,null,React.createElement(EditExpenseView,{expense:editingExpense,imports,accounts,payers,cats,matchPenalties,onSave:updateExpenseFn,onUnlink:unlinkExpenseFn,onLink:linkExpenseFn,onBack:()=>{setEditingExpense(null);setView("history");},toast_}));
-  if(view==="dashboard")return React.createElement(RouteWrap,null,React.createElement(DashboardView,{expenses,cats,payers,accounts,onBack:()=>setView("home")}));
-  if(view==="import")return React.createElement(RouteWrap,null,React.createElement(ImportView,{accounts,imports,expenses,cats,payers,lmap,scriptUrl:cfg.scriptUrl,onAddAccount:addAccount,onDeleteAccount:deleteAccountFn,onUploadCsv:uploadCsv,onUpdateImport:updateImport,onDeleteImport:deleteImportFn,onLaunchImports:launchImports,onDeleteSession:deleteSessionFn,onBack:()=>setView("home"),toast_}));
-  if(view==="settings")return React.createElement(RouteWrap,null,React.createElement(SettingsView,{payers,cfg,lmap,cats,apiKey,setApiKey,uploadFolderUrl,onAddPayer:addPayer,onDeletePayer:deletePayer,onChangeUrl:changeUrl,onDeleteLearning:deleteLearning,onAddCategory:addCategory,onDeleteCategory:deleteCategory,onResetData:resetDataFn,onCleanupDuplicates:cleanupDuplicatesFn,onFixPayers:fixPayersFn,onBack:()=>setView("home"),toast_,onRefresh:syncDown,syncing}));
+  if(view==="localfiles")return React.createElement(React.Fragment,null,toastSlot,React.createElement(LocalFileProcessor,{files:localFiles,payers,lmap,cats,apiKey,imports,accounts,matchPenalties,onSave:saveExpense,onSaveLinked:saveLinkedExpense,onFinish:()=>{setView("home");toast_("✅ Concluído!");},toast_}));
+  if(view==="capture")return React.createElement(React.Fragment,null,toastSlot,React.createElement(CaptureView,{payers,lmap,cats,apiKey,imports,accounts,matchPenalties,onSave:saveAndReturnHome,onSaveLinked:saveLinkedAndReturnHome,onBack:()=>setView("home"),toast_}));
+  if(view==="upload")return React.createElement(React.Fragment,null,toastSlot,React.createElement(BulkUploadProcessor,{key:"bulk-uploader",uploads:pendingUploads,expensesAll:expenses,payers,lmap,cats,apiKey,scriptUrl:cfg.scriptUrl,imports,accounts,matchPenalties,onSaveBulk:saveBulkExpense,onDeleteUpload:deleteUploadFile,onMoveToErrors:moveToErrorsFn,onFinish:()=>{checkUploads();syncDown();setView("history");},toast_}));
+  if(view==="history")return React.createElement(React.Fragment,null,toastSlot,React.createElement(HistoryView,{expenses,cats,accounts,onBack:()=>setView("home"),onDelete:deleteExpense,onUnlink:unlinkExpenseFn,onEdit:e=>{setEditingExpense(e);setView("editExpense");}}));
+  if(view==="editExpense"&&editingExpense)return React.createElement(React.Fragment,null,toastSlot,React.createElement(EditExpenseView,{expense:editingExpense,imports,accounts,payers,cats,matchPenalties,onSave:updateExpenseFn,onUnlink:unlinkExpenseFn,onLink:linkExpenseFn,onBack:()=>{setEditingExpense(null);setView("history");},toast_}));
+  if(view==="dashboard")return React.createElement(React.Fragment,null,toastSlot,React.createElement(DashboardView,{expenses,cats,payers,accounts,onBack:()=>setView("home")}));
+  if(view==="import")return React.createElement(React.Fragment,null,toastSlot,React.createElement(ImportView,{accounts,imports,expenses,cats,payers,lmap,scriptUrl:cfg.scriptUrl,onAddAccount:addAccount,onDeleteAccount:deleteAccountFn,onUploadCsv:uploadCsv,onUpdateImport:updateImport,onDeleteImport:deleteImportFn,onLaunchImports:launchImports,onDeleteSession:deleteSessionFn,onBack:()=>setView("home"),toast_}));
+  if(view==="settings")return React.createElement(React.Fragment,null,toastSlot,React.createElement(SettingsView,{payers,cfg,lmap,cats,apiKey,setApiKey,uploadFolderUrl,onAddPayer:addPayer,onDeletePayer:deletePayer,onChangeUrl:changeUrl,onDeleteLearning:deleteLearning,onAddCategory:addCategory,onDeleteCategory:deleteCategory,onResetData:resetDataFn,onCleanupDuplicates:cleanupDuplicatesFn,onFixPayers:fixPayersFn,onBack:()=>setView("home"),toast_,onRefresh:syncDown,syncing}));
 
   // HOME
   const now=new Date();
