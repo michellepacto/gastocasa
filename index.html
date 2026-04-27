@@ -2143,21 +2143,29 @@ function LocalFileProcessor({files,payers,lmap,cats,apiKey,imports,accounts,matc
 // Cada despesa é lançada com flag reviewed=false, mostrando ícone ! no histórico.
 function BulkUploadProcessor({uploads,expensesAll,payers,lmap,cats,apiKey,scriptUrl,imports,accounts,matchPenalties,onSaveBulk,onDeleteUpload,onMoveToErrors,onFinish,toast_}){
   const [idx,setIdx]=useState(0);
-  const [stage,setStage]=useState("starting");
+  const [stage,setStage]=useState("config"); // começa na tela de configuração
+  const [defaultPayer,setDefaultPayer]=useState(payers[0]||"");
   const [currentFile,setCurrentFile]=useState(null);
   const [stats,setStats]=useState({success:0,linked:0,failed:0,skipped:0});
   const [log,setLog]=useState([]);
   const cancelRef=useRef(false);
   
-  useEffect(()=>{
-    cancelRef.current=false;
-    processAll();
-    return()=>{cancelRef.current=true;};
-  },[]);
-  
   const addLog=(msg,type="ok")=>{
     setLog(p=>[{msg,type,at:Date.now()},...p].slice(0,8));
   };
+  
+  const startProcessing=()=>{
+    if(!defaultPayer){toast_("Escolha o pagador padrão","err");return;}
+    cancelRef.current=false;
+    setStage("processing");
+  };
+  
+  useEffect(()=>{
+    if(stage==="processing"){
+      processAll();
+    }
+    return()=>{cancelRef.current=true;};
+  },[stage]);
   
   const processAll=async()=>{
     setStage("processing");
@@ -2226,13 +2234,14 @@ function BulkUploadProcessor({uploads,expensesAll,payers,lmap,cats,apiKey,script
         const items=claude.items||[];
         
         // 4. Tenta achar match bancário
-        let importId="",accountName="",payer=payers[0]||"Eu";
+        let importId="",accountName="",payer=defaultPayer||payers[0]||"";
         const tempExp={merchant,total:v,date};
         const matches=findImportMatches(tempExp,imports||[],50,matchPenalties);
         if(matches.length>0){
           const bestImp=matches[0].imp;
           const acc=accounts?.find(a=>a.id===bestImp.accountId);
           importId=bestImp.id;
+          // Conta vinculada tem prioridade sobre o pagador padrão
           if(acc){accountName=acc.name;payer=acc.payer||payer;}
         }
         
@@ -2301,6 +2310,24 @@ function BulkUploadProcessor({uploads,expensesAll,payers,lmap,cats,apiKey,script
     cancelRef.current=true;
     setStage("done");
   };
+  
+  if(stage==="config")return React.createElement(Wrap,{pb:30},
+    React.createElement(Header,{title:"Processamento em massa",subtitle:`${uploads.length} arquivo${uploads.length!==1?"s":""}`,onBack:onFinish}),
+    React.createElement("div",{style:{padding:16}},
+      React.createElement(Card,{title:"👤 Quem são os comprovantes?"},
+        React.createElement("div",{style:{fontSize:13,color:"#6b7280",marginBottom:14,lineHeight:1.5}},
+          "Quando o comprovante não tiver vínculo bancário identificado, quem será o pagador padrão?"
+        ),
+        React.createElement("div",{style:{display:"flex",gap:8,flexWrap:"wrap",marginBottom:14}},
+          payers.map(p=>React.createElement("button",{key:p,onClick:()=>setDefaultPayer(p),style:{padding:"10px 20px",borderRadius:24,border:"2px solid",borderColor:defaultPayer===p?"#1a3a2a":"#e5e7eb",background:defaultPayer===p?"#1a3a2a":"#fff",color:defaultPayer===p?"#fff":"#374151",fontWeight:700,fontSize:14}},p))
+        ),
+        React.createElement("div",{style:{padding:10,background:"#f0fdf4",borderRadius:10,fontSize:12,color:"#166534"}},
+          "💡 Se o comprovante tiver vínculo bancário (ex: Cartão Nubank Gustavo), o dono da conta prevalece automaticamente."
+        )
+      ),
+      React.createElement("button",{onClick:startProcessing,disabled:!defaultPayer,style:{width:"100%",padding:16,borderRadius:16,background:"linear-gradient(135deg,#1a3a2a,#2d5a3d)",color:"#fff",border:"none",fontWeight:700,fontSize:15}},"🚀 Iniciar processamento")
+    )
+  );
   
   if(stage==="starting")return React.createElement(Wrap,{pb:30},
     React.createElement(Header,{title:"Iniciando..."}),
@@ -2417,8 +2444,16 @@ function EditExpenseView({expense,imports,accounts,payers,cats,matchPenalties,on
   const [total,setTotal]=useState(String(expense.total||""));
   const [date,setDate]=useState(expense.date||today());
   const [category,setCategory]=useState(expense.category||"Outros");
-  const [payer,setPayer]=useState(expense.payer||(payers[0]||""));
-  const [splitWith,setSplitWith]=useState(expense.splitWith&&expense.splitWith.length?expense.splitWith:[expense.payer].filter(Boolean));
+  
+  // Se tem conta vinculada, usa o dono da conta como pagador padrão
+  const linkedAcc0=expense.account?accounts.find(a=>a.name===expense.account):null;
+  const defaultPayer=linkedAcc0?.payer||expense.payer||(payers[0]||"");
+  const [payer,setPayer]=useState(defaultPayer);
+  const [splitWith,setSplitWith]=useState(
+    expense.splitWith&&expense.splitWith.length
+      ?expense.splitWith
+      :[defaultPayer].filter(Boolean)
+  );
   const [showRelink,setShowRelink]=useState(false);
   
   const linkedImp=expense.importId?imports.find(i=>i.id===expense.importId):null;
@@ -2456,12 +2491,17 @@ function EditExpenseView({expense,imports,accounts,payers,cats,matchPenalties,on
   
   const handlePickNewLink=async(newImp)=>{
     const acc=accounts.find(a=>a.id===newImp.accountId);
-    if(!confirm(`Vincular a "${newImp.title}" (${acc?.name||"?"})?`))return;
+    if(!confirm(`Vincular a "${newImp.title}" (${acc?.name||"?"})?\n\nO pagador será atualizado para: ${acc?.payer||payer}`))return;
     // Se já tinha vínculo, desvincula primeiro (gera penalty)
     if(linkedImp){
       await onUnlink(expense.id,merchant,linkedImp.title);
     }
     await onLink(expense.id,newImp.id,acc?.name||"");
+    // Atualiza pagador automaticamente para o dono da conta
+    if(acc?.payer){
+      setPayer(acc.payer);
+      if(!splitWith.includes(acc.payer))setSplitWith([acc.payer]);
+    }
     setShowRelink(false);
   };
   
@@ -2614,7 +2654,7 @@ function CategoryEditor({apiKey,cats,onAdd,onCancel,toast_}){
   );
 }
 
-function SettingsView({payers,cfg,lmap,cats,apiKey,setApiKey,uploadFolderUrl,onAddPayer,onDeletePayer,onChangeUrl,onDeleteLearning,onAddCategory,onDeleteCategory,onResetData,onCleanupDuplicates,onBack,toast_,onRefresh,syncing}){
+function SettingsView({payers,cfg,lmap,cats,apiKey,setApiKey,uploadFolderUrl,onAddPayer,onDeletePayer,onChangeUrl,onDeleteLearning,onAddCategory,onDeleteCategory,onResetData,onCleanupDuplicates,onFixPayers,onBack,toast_,onRefresh,syncing}){
   const [newPayer,setNewPayer]=useState("");const [url,setUrl]=useState(cfg.scriptUrl||"");
   const [keyInput,setKeyInput]=useState(apiKey||"");const [showKey,setShowKey]=useState(false);
   const [editingCategory,setEditingCategory]=useState(false);
@@ -2658,6 +2698,14 @@ function SettingsView({payers,cfg,lmap,cats,apiKey,setApiKey,uploadFolderUrl,onA
           React.createElement("div",{style:{flex:1,minWidth:0}},React.createElement("div",{style:{fontSize:13,fontWeight:600,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}},m),React.createElement("div",{style:{fontSize:11,color:"#6b7280"}},`${getCat(cats,c).i} ${c}`)),
           React.createElement("button",{onClick:()=>onDeleteLearning(m),style:{background:"none",border:"none",fontSize:16,padding:4}},"🗑️")
         )))
+      ),
+      React.createElement(Card,{title:"👤 Corrigir pagadores vinculados"},
+        React.createElement("div",{style:{fontSize:12,color:"#6b7280",marginBottom:12,lineHeight:1.5}},
+          "Varre despesas que têm conta bancária vinculada e corrige o pagador para o dono da conta.",
+          React.createElement("br"),
+          "Ex: gasto no ",React.createElement("b",null,"Cartão Nubank Gustavo")," com pagador Michelle → corrige para Gustavo."
+        ),
+        React.createElement("button",{onClick:onFixPayers,style:{width:"100%",padding:12,borderRadius:12,background:"#2563eb",color:"#fff",border:"none",fontWeight:700,fontSize:14}},"🔧 Verificar e corrigir pagadores")
       ),
       React.createElement(Card,{title:"🧹 Limpar duplicatas"},
         React.createElement("div",{style:{fontSize:12,color:"#6b7280",marginBottom:12,lineHeight:1.5}},
@@ -2876,7 +2924,47 @@ function App(){
     }
   };
   
-  // Mecanismo 3: detecta e remove duplicatas
+  const fixPayersFn=async()=>{
+    // Mapa: nome da conta → dono
+    const accountByName={};
+    accounts.forEach(a=>{if(a.name&&a.payer)accountByName[a.name]=a.payer;});
+    
+    // Acha despesas com conta vinculada e pagador errado
+    const toFix=expenses.filter(e=>{
+      if(!e.account)return false;
+      const correctPayer=accountByName[e.account];
+      if(!correctPayer)return false;
+      return e.payer!==correctPayer;
+    });
+    
+    if(toFix.length===0){toast_("✅ Nenhum pagador incorreto encontrado!");return;}
+    
+    // Monta preview
+    let preview=`Encontradas ${toFix.length} despesa(s) com pagador incorreto:\n\n`;
+    toFix.slice(0,8).forEach(e=>{
+      const correct=accountByName[e.account];
+      preview+=`• ${(e.merchant||"?").slice(0,25)} (${brl(e.total)})\n  ${e.account}\n  ${e.payer} → ${correct}\n\n`;
+    });
+    if(toFix.length>8)preview+=`... e mais ${toFix.length-8} despesas\n\n`;
+    preview+=`Corrigir todas?`;
+    
+    if(!confirm(preview))return;
+    
+    // Aplica correções
+    let fixed=0;
+    for(const e of toFix){
+      const correctPayer=accountByName[e.account];
+      // Atualiza splitWith: substitui o pagador antigo pelo correto
+      const newSplitWith=e.splitWith&&e.splitWith.length>0
+        ?e.splitWith.map(p=>p===e.payer?correctPayer:p)
+        :[correctPayer];
+      try{
+        await updateExpenseFn(e.id,{payer:correctPayer,splitWith:newSplitWith});
+        fixed++;
+      }catch{}
+    }
+    toast_(`✅ ${fixed} despesa(s) corrigida(s)`);
+  };
   const cleanupDuplicatesFn=async()=>{
     // Agrupa por chave: estabelecimento + data + valor
     const norm=s=>(s||"").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"").trim();
@@ -3033,7 +3121,7 @@ function App(){
   if(view==="editExpense"&&editingExpense)return React.createElement(RouteWrap,null,React.createElement(EditExpenseView,{expense:editingExpense,imports,accounts,payers,cats,matchPenalties,onSave:updateExpenseFn,onUnlink:unlinkExpenseFn,onLink:linkExpenseFn,onBack:()=>{setEditingExpense(null);setView("history");},toast_}));
   if(view==="dashboard")return React.createElement(RouteWrap,null,React.createElement(DashboardView,{expenses,cats,payers,accounts,onBack:()=>setView("home")}));
   if(view==="import")return React.createElement(RouteWrap,null,React.createElement(ImportView,{accounts,imports,expenses,cats,payers,lmap,scriptUrl:cfg.scriptUrl,onAddAccount:addAccount,onDeleteAccount:deleteAccountFn,onUploadCsv:uploadCsv,onUpdateImport:updateImport,onDeleteImport:deleteImportFn,onLaunchImports:launchImports,onDeleteSession:deleteSessionFn,onBack:()=>setView("home"),toast_}));
-  if(view==="settings")return React.createElement(RouteWrap,null,React.createElement(SettingsView,{payers,cfg,lmap,cats,apiKey,setApiKey,uploadFolderUrl,onAddPayer:addPayer,onDeletePayer:deletePayer,onChangeUrl:changeUrl,onDeleteLearning:deleteLearning,onAddCategory:addCategory,onDeleteCategory:deleteCategory,onResetData:resetDataFn,onCleanupDuplicates:cleanupDuplicatesFn,onBack:()=>setView("home"),toast_,onRefresh:syncDown,syncing}));
+  if(view==="settings")return React.createElement(RouteWrap,null,React.createElement(SettingsView,{payers,cfg,lmap,cats,apiKey,setApiKey,uploadFolderUrl,onAddPayer:addPayer,onDeletePayer:deletePayer,onChangeUrl:changeUrl,onDeleteLearning:deleteLearning,onAddCategory:addCategory,onDeleteCategory:deleteCategory,onResetData:resetDataFn,onCleanupDuplicates:cleanupDuplicatesFn,onFixPayers:fixPayersFn,onBack:()=>setView("home"),toast_,onRefresh:syncDown,syncing}));
 
   // HOME
   const now=new Date();
