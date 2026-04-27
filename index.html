@@ -605,7 +605,11 @@ async function migrateSheetsToSupabase(scriptUrl, onProgress) {
   const catName = (c) => {
     if (!c) return null;
     if (typeof c === "string") return c.trim() || null;
-    return (c.name || c.label || c.nome || "").trim() || null;
+    return (c.name || c.label || c.nome || c.n || "").trim() || null;
+  };
+  const catEmoji = (c) => {
+    if (!c || typeof c === "string") return "";
+    return c.emoji || c.icon || c.i || "";
   };
   
   // ─── PAGADORES ─────────────────────────────────────────────────────
@@ -625,7 +629,7 @@ async function migrateSheetsToSupabase(scriptUrl, onProgress) {
   for (const c of categories) {
     const name = catName(c);
     if (!name) { stats.errors.push(`categoria sem nome: ${JSON.stringify(c).slice(0,60)}`); continue; }
-    const emoji = (typeof c === "object" && c) ? (c.emoji || c.icon || "") : "";
+    const emoji = catEmoji(c);
     const { error } = await supa.from("categories").upsert({ name, emoji }, { onConflict: "name" });
     if (error) stats.errors.push(`category ${name}: ${error.message}`);
     else stats.categories++;
