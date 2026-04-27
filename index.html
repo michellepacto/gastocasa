@@ -1647,9 +1647,9 @@ function DashboardView({expenses,cats,payers,accounts,onBack}){
 
 function ReviewForm({imageUrl,pdfFilename,result,setResult,payer,setPayer,splitWith,setSplitWith,payers,cats,onSave,saveLabel="💾 Salvar gasto",extraButton}){
   const set=(k,v)=>setResult(p=>({...p,[k]:v}));
-  useEffect(()=>{if(payer&&!splitWith.includes(payer))setSplitWith(p=>[...p,payer]);},[payer]);
+
   const toggleAll=()=>{if(splitWith.length===payers.length)setSplitWith([payer]);else setSplitWith([...payers]);};
-  const togglePerson=(p)=>{if(p===payer)return;if(splitWith.includes(p))setSplitWith(splitWith.filter(x=>x!==p));else setSplitWith([...splitWith,p]);};
+  const togglePerson=(p)=>{if(splitWith.includes(p))setSplitWith(splitWith.filter(x=>x!==p));else setSplitWith([...splitWith,p]);};
   const valorPorPessoa=parseFloat((result.total||"0").replace(",","."))/Math.max(1,splitWith.length);
   return React.createElement("div",{style:{padding:16}},
     React.createElement(PreviewBox,{imageUrl,pdfFilename}),
@@ -1674,7 +1674,7 @@ function ReviewForm({imageUrl,pdfFilename,result,setResult,payer,setPayer,splitW
     React.createElement(Card,{title:"🤝 Dividir entre quem?"},
       React.createElement("button",{onClick:toggleAll,style:{width:"100%",padding:10,borderRadius:12,border:"none",background:splitWith.length===payers.length?"#1a3a2a":"#f3f4f6",color:splitWith.length===payers.length?"#fff":"#374151",fontWeight:700,fontSize:13,marginBottom:10}},splitWith.length===payers.length?"✓ Todos":"+ Marcar todos"),
       React.createElement("div",{style:{display:"flex",gap:8,flexWrap:"wrap"}},
-        payers.map(p=>{const sel=splitWith.includes(p);const isPayer=p===payer;return React.createElement("button",{key:p,onClick:()=>togglePerson(p),style:{padding:"8px 14px",borderRadius:24,border:"2px solid",borderColor:sel?"#2d5a3d":"#e5e7eb",background:sel?"#2d5a3d":"#fff",color:sel?"#fff":"#374151",fontWeight:600,fontSize:13,display:"flex",alignItems:"center",gap:5,opacity:isPayer?0.85:1}},sel&&React.createElement("span",null,"✓"),p,isPayer&&React.createElement("span",{style:{fontSize:9,opacity:.8}},"💳"));})
+        payers.map(p=>{const sel=splitWith.includes(p);const isPayer=p===payer;return React.createElement("button",{key:p,onClick:()=>togglePerson(p),style:{padding:"8px 14px",borderRadius:24,border:"2px solid",borderColor:sel?"#2d5a3d":"#e5e7eb",background:sel?"#2d5a3d":"#fff",color:sel?"#fff":"#374151",fontWeight:600,fontSize:13,display:"flex",alignItems:"center",gap:5,opacity:1}},sel&&React.createElement("span",null,"✓"),p,isPayer&&React.createElement("span",{style:{fontSize:9,opacity:.8}},"💳"));})
       ),
       splitWith.length>1&&result.total&&React.createElement("div",{style:{marginTop:12,padding:10,background:"#f0fdf4",border:"1.5px solid #16a34a40",borderRadius:12,fontSize:13,color:"#166534",textAlign:"center",fontWeight:600}},`${brl(valorPorPessoa)} por pessoa (${splitWith.length})`)
     ),
@@ -2494,9 +2494,9 @@ function EditExpenseView({expense,imports,accounts,payers,cats,matchPenalties,al
     return findImportMatches(tempExp,imports.filter(i=>i.id!==expense.importId),30,matchPenalties);
   },[merchant,total,date,imports,expense.importId,matchPenalties]);
   
-  useEffect(()=>{if(payer&&!splitWith.includes(payer))setSplitWith(p=>[...p,payer]);},[payer]);
+
   
-  const togglePerson=(p)=>{if(p===payer)return;if(splitWith.includes(p))setSplitWith(splitWith.filter(x=>x!==p));else setSplitWith([...splitWith,p]);};
+  const togglePerson=(p)=>{if(splitWith.includes(p))setSplitWith(splitWith.filter(x=>x!==p));else setSplitWith([...splitWith,p]);};
   const toggleAll=()=>{if(splitWith.length===payers.length)setSplitWith([payer]);else setSplitWith([...payers]);};
   
   const handleSave=async()=>{
@@ -2688,7 +2688,7 @@ function EditExpenseView({expense,imports,accounts,payers,cats,matchPenalties,al
       React.createElement(Card,{title:"🤝 Dividir entre"},
         React.createElement("button",{onClick:toggleAll,style:{width:"100%",padding:10,borderRadius:12,border:"none",background:splitWith.length===payers.length?"#1a3a2a":"#f3f4f6",color:splitWith.length===payers.length?"#fff":"#374151",fontWeight:700,fontSize:13,marginBottom:10}},splitWith.length===payers.length?"✓ Todos":"+ Marcar todos"),
         React.createElement("div",{style:{display:"flex",gap:8,flexWrap:"wrap"}},
-          payers.map(p=>{const sel=splitWith.includes(p);const isPayer=p===payer;return React.createElement("button",{key:p,onClick:()=>togglePerson(p),style:{padding:"8px 14px",borderRadius:24,border:"2px solid",borderColor:sel?"#2d5a3d":"#e5e7eb",background:sel?"#2d5a3d":"#fff",color:sel?"#fff":"#374151",fontWeight:600,fontSize:13,display:"flex",alignItems:"center",gap:5,opacity:isPayer?0.85:1}},sel&&React.createElement("span",null,"✓"),p,isPayer&&React.createElement("span",{style:{fontSize:9,opacity:.8}},"💳"));})
+          payers.map(p=>{const sel=splitWith.includes(p);const isPayer=p===payer;return React.createElement("button",{key:p,onClick:()=>togglePerson(p),style:{padding:"8px 14px",borderRadius:24,border:"2px solid",borderColor:sel?"#2d5a3d":"#e5e7eb",background:sel?"#2d5a3d":"#fff",color:sel?"#fff":"#374151",fontWeight:600,fontSize:13,display:"flex",alignItems:"center",gap:5,opacity:1}},sel&&React.createElement("span",null,"✓"),p,isPayer&&React.createElement("span",{style:{fontSize:9,opacity:.8}},"💳"));})
         ),
         splitWith.length>1&&total&&React.createElement("div",{style:{marginTop:12,padding:10,background:"#f0fdf4",border:"1.5px solid #16a34a40",borderRadius:12,fontSize:13,color:"#166534",textAlign:"center",fontWeight:600}},`${brl(valorPorPessoa)} por pessoa`)
       ),
