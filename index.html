@@ -768,7 +768,18 @@ const Toast=({t})=>{
   const bg=isWaiting?"#f59e0b":t.type==="err"?"#dc2626":"#1a3a2a";
   return React.createElement("div",{style:{position:"fixed",top:16,left:"50%",transform:"translateX(-50%)",background:bg,color:"#fff",padding:"10px 22px",borderRadius:24,zIndex:9999,fontSize:14,fontWeight:600,boxShadow:"0 4px 20px rgba(0,0,0,.25)",maxWidth:400,textAlign:"center"}},t.msg);
 };
-const Wrap=({children,pb=80,wide=false})=>React.createElement("div",{style:{maxWidth:wide?1200:430,margin:"0 auto",minHeight:"100vh",background:"#f4f1eb",paddingBottom:pb,position:"relative"}},children);
+// Detecta se é desktop (largura > 768px)
+const isDesktop=()=>window.innerWidth>768;
+
+const Wrap=({children,pb=80,wide=false})=>{
+  const desktop=isDesktop();
+  if(desktop){
+    return React.createElement("div",{style:{minHeight:"100vh",background:"#e8e4da",display:"flex",flexDirection:"column"}},
+      React.createElement("div",{style:{flex:1,maxWidth:1400,width:"100%",margin:"0 auto",padding:"0 24px",boxSizing:"border-box",paddingBottom:pb}},children)
+    );
+  }
+  return React.createElement("div",{style:{maxWidth:wide?"100%":430,width:"100%",margin:"0 auto",minHeight:"100vh",background:"#f4f1eb",paddingBottom:pb,position:"relative",boxSizing:"border-box"}},children);
+};
 const Card=({title,children,style={},onClick,right})=>React.createElement("div",{style:{background:"#fff",borderRadius:20,padding:16,marginBottom:14,boxShadow:"0 1px 8px rgba(0,0,0,.06)",cursor:onClick?"pointer":"default",...style},onClick},
   title&&React.createElement("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}},React.createElement("div",{style:{fontWeight:700,fontSize:13,color:"#374151"}},title),right),
   children
@@ -810,17 +821,21 @@ const InputEl=({value,onChange,...props})=>React.createElement("input",{value,on
 const SelectEl=({value,onChange,children,...props})=>React.createElement("select",{value,onChange:e=>onChange(e.target.value),...props,style:{width:"100%",padding:"10px 12px",borderRadius:12,border:"1.5px solid #e5e7eb",fontSize:14,outline:"none",background:"#fff",...(props.style||{})}},children);
 const Spinner=({size=20,color="#fff"})=>React.createElement("div",{className:"spin",style:{width:size,height:size,border:`2.5px solid ${color}30`,borderTopColor:color,borderRadius:"50%",flexShrink:0}});
 
-const Header=({title,onBack,subtitle,right,green=true})=>React.createElement("div",{style:{background:green?"linear-gradient(135deg,#1a3a2a,#2d5a3d)":"#fff",padding:"20px 16px 22px",borderRadius:"0 0 28px 28px",marginBottom:4}},
-  React.createElement("div",{style:{display:"flex",alignItems:"center",justifyContent:"space-between",gap:8}},
-    React.createElement("div",{style:{display:"flex",alignItems:"center",gap:12,flex:1,minWidth:0}},
-      onBack&&React.createElement(BackBtn,{onClick:onBack}),
-      React.createElement("div",{style:{minWidth:0,flex:1}},
-        React.createElement("div",{style:{color:green?"#fff":"#1a1a1a",fontWeight:700,fontSize:18,fontFamily:"Fraunces"}},title),
-        subtitle&&React.createElement("div",{style:{color:green?"rgba(255,255,255,.7)":"#6b7280",fontSize:12,marginTop:2}},subtitle)
-      )
-    ),right
-  )
-);
+const Header=({title,onBack,subtitle,right,green=true})=>{
+  const desktop=isDesktop();
+  return React.createElement("div",{style:{background:green?"linear-gradient(135deg,#1a3a2a,#2d5a3d)":"#fff",padding:desktop?"16px 24px 18px":"20px 16px 22px",borderRadius:desktop?"16px":"0 0 28px 28px",marginBottom:desktop?16:4}},
+    React.createElement("div",{style:{display:"flex",alignItems:"center",justifyContent:"space-between",gap:8}},
+      React.createElement("div",{style:{display:"flex",alignItems:"center",gap:12,flex:1,minWidth:0}},
+        onBack&&React.createElement(BackBtn,{onClick:onBack}),
+        React.createElement("div",{style:{minWidth:0,flex:1}},
+          React.createElement("div",{style:{color:green?"#fff":"#1a1a1a",fontWeight:700,fontSize:desktop?22:18,fontFamily:"Fraunces"}},title),
+          subtitle&&React.createElement("div",{style:{color:green?"rgba(255,255,255,.7)":"#6b7280",fontSize:12,marginTop:2}},subtitle)
+        )
+      ),
+      right&&React.createElement("div",null,right)
+    )
+  );
+};
 
 const PreviewBox=({imageUrl,pdfFilename})=>{
   if(imageUrl)return React.createElement("div",{style:{marginBottom:14,borderRadius:16,overflow:"hidden",height:130}},React.createElement("img",{src:imageUrl,style:{width:"100%",height:"100%",objectFit:"cover"}}));
@@ -2821,6 +2836,14 @@ function SettingsView({payers,cfg,lmap,cats,apiKey,setApiKey,uploadFolderUrl,onA
 function App(){
   const [view,setView]=useState("home");
   const [localFiles,setLocalFiles]=useState([]);
+  const [desktop,setDesktop]=useState(()=>window.innerWidth>768);
+  
+  // Atualiza quando redimensiona
+  React.useEffect(()=>{
+    const onResize=()=>setDesktop(window.innerWidth>768);
+    window.addEventListener("resize",onResize);
+    return()=>window.removeEventListener("resize",onResize);
+  },[]);
   const [cfg,setCfg]=useState(()=>ld("cfg",{scriptUrl:""}));
   const [apiKey,setApiKey]=useState(()=>ld("apiKey",""));
   const [expenses,setExpenses]=useState(()=>ld("exp",[]));
@@ -3244,7 +3267,100 @@ function App(){
   const lmTotal=lmExp.reduce((s,e)=>s+(+e.total||0),0);
   const diff=mTotal-lmTotal;
   const pendingImports=imports.filter(i=>i.status==="pendente").length;
+  const unreviewedCount=expenses.filter(e=>e.reviewed===false).length;
 
+  // Botões de ação principais (shared entre mobile e desktop)
+  const actionButtons=React.createElement(React.Fragment,null,
+    pendingUploads.length>0&&React.createElement("button",{onClick:()=>setView("upload"),className:"pulse",style:{width:"100%",padding:"14px 18px",borderRadius:16,border:"none",background:"linear-gradient(135deg,#f59e0b,#ea580c)",color:"#fff",fontWeight:700,fontSize:14,marginBottom:12,display:"flex",alignItems:"center",justifyContent:"space-between",boxShadow:"0 4px 16px rgba(234,88,12,.35)"}},
+      React.createElement("div",{style:{display:"flex",alignItems:"center",gap:10}},React.createElement("span",{style:{fontSize:22}},"📥"),React.createElement("div",{style:{textAlign:"left"}},React.createElement("div",{style:{fontSize:14}},`${pendingUploads.length} comprovante${pendingUploads.length>1?"s":""} para processar`),React.createElement("div",{style:{fontSize:11,opacity:.85}},"Processa todos automaticamente"))),
+      React.createElement("span",{style:{fontSize:18}},"→")
+    ),
+    pendingImports>0&&React.createElement("button",{onClick:()=>setView("import"),style:{width:"100%",padding:"14px 18px",borderRadius:16,border:"none",background:"linear-gradient(135deg,#2563eb,#1e40af)",color:"#fff",fontWeight:700,fontSize:14,marginBottom:12,display:"flex",alignItems:"center",justifyContent:"space-between",boxShadow:"0 4px 16px rgba(37,99,235,.3)"}},
+      React.createElement("div",{style:{display:"flex",alignItems:"center",gap:10}},React.createElement("span",{style:{fontSize:22}},"💳"),React.createElement("div",{style:{textAlign:"left"}},React.createElement("div",{style:{fontSize:14}},`${pendingImports} importação${pendingImports>1?"ões":""}  pendente${pendingImports>1?"s":""}`),React.createElement("div",{style:{fontSize:11,opacity:.85}},"Aguardando revisão"))),
+      React.createElement("span",{style:{fontSize:18}},"→")
+    ),
+    React.createElement("div",{style:{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:12}},
+      React.createElement("button",{onClick:()=>setView("dashboard"),style:{padding:"16px 14px",borderRadius:16,border:"none",background:"linear-gradient(135deg,#7c3aed,#5b21b6)",color:"#fff",fontWeight:700,boxShadow:"0 4px 16px rgba(124,58,237,.3)",cursor:"pointer",textAlign:"left"}},
+        React.createElement("div",{style:{fontSize:22,marginBottom:4}},"📊"),
+        React.createElement("div",{style:{fontSize:14}},"Dashboard"),
+        React.createElement("div",{style:{fontSize:10,opacity:.85,fontWeight:500}},"Análises completas")
+      ),
+      React.createElement("button",{onClick:()=>setView("import"),style:{padding:"16px 14px",borderRadius:16,border:"none",background:"linear-gradient(135deg,#0891b2,#0e7490)",color:"#fff",fontWeight:700,boxShadow:"0 4px 16px rgba(8,145,178,.3)",cursor:"pointer",textAlign:"left"}},
+        React.createElement("div",{style:{fontSize:22,marginBottom:4}},"💳"),
+        React.createElement("div",{style:{fontSize:14}},"Extratos"),
+        React.createElement("div",{style:{fontSize:10,opacity:.85,fontWeight:500}},"CSV Nubank e Bradesco")
+      )
+    ),
+    React.createElement("label",{style:{display:"block",marginBottom:12,cursor:"pointer"}},
+      React.createElement("input",{type:"file",accept:"image/*,.pdf",multiple:true,style:{display:"none"},onChange:e=>{
+        const arr=Array.from(e.target.files||[]);
+        if(arr.length===0)return;
+        if(!apiKey){toast_("⚠️ Configure a chave da Anthropic em ⚙️ para usar IA","err");return;}
+        setLocalFiles(arr);setView("localfiles");
+        e.target.value="";
+      }}),
+      React.createElement("div",{style:{width:"100%",padding:"14px 18px",borderRadius:16,border:"2px dashed #7c3aed",background:"#faf5ff",color:"#7c3aed",fontWeight:700,fontSize:14,display:"flex",alignItems:"center",gap:12,boxSizing:"border-box"}},
+        React.createElement("span",{style:{fontSize:22}},"📎"),
+        React.createElement("div",null,
+          React.createElement("div",null,"Selecionar comprovantes"),
+          React.createElement("div",{style:{fontSize:11,fontWeight:500,opacity:.8}},"JPG, PNG ou PDF · vários de uma vez")
+        )
+      )
+    )
+  );
+
+  // Recentes
+  const recentsList=React.createElement(React.Fragment,null,
+    React.createElement("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}},
+      React.createElement("h3",{style:{margin:0,fontSize:15,fontWeight:700}},`Recentes${unreviewedCount>0?` · ${unreviewedCount} ⚠️`:"" }`),
+      React.createElement("button",{onClick:()=>setView("history"),style:{background:"none",border:"none",color:"#2d5a3d",fontWeight:600,fontSize:13}},"Ver tudo →")
+    ),
+    React.createElement(Card,null,
+      expenses.length===0&&React.createElement("div",{style:{textAlign:"center",color:"#9ca3af",padding:20,fontSize:14}},"Nenhum gasto ainda"),
+      expenses.slice(0,desktop?15:8).map(e=>React.createElement("div",{key:e.id,style:{cursor:"pointer"},onClick:()=>{setEditingExpense(e);setView("editExpense");}},React.createElement(ExpRow,{e,cats,accounts})))
+    )
+  );
+
+  if(desktop){
+    // Layout desktop: sidebar esquerda + conteúdo principal
+    return React.createElement(React.Fragment,null,toastSlot,
+      React.createElement("div",{style:{minHeight:"100vh",background:"#e8e4da",display:"flex"}},
+        // Sidebar esquerda
+        React.createElement("div",{style:{width:260,minHeight:"100vh",background:"linear-gradient(180deg,#1a3a2a,#2d5a3d)",padding:"24px 16px",flexShrink:0,display:"flex",flexDirection:"column",gap:8}},
+          React.createElement("div",{style:{marginBottom:20}},
+            React.createElement("div",{style:{color:"rgba(255,255,255,.6)",fontSize:12,marginBottom:4}},new Date().toLocaleDateString("pt-BR",{month:"long",year:"numeric"})),
+            React.createElement("div",{style:{color:"#fff",fontSize:32,fontFamily:"Fraunces",fontWeight:700,lineHeight:1}},brl(mTotal)),
+            lmTotal>0&&React.createElement("div",{style:{color:diff>0?"#fca5a5":"#86efac",fontSize:12,marginTop:4}},(diff>0?"▲ +":"▼ ")+brl(Math.abs(diff))+" vs mês anterior"),
+            React.createElement("div",{style:{color:"rgba(255,255,255,.5)",fontSize:11,marginTop:4}},`${expenses.length} gastos`)
+          ),
+          // Nav items
+          [{icon:"🏠",label:"Início",v:"home"},{icon:"📊",label:"Dashboard",v:"dashboard"},{icon:"💳",label:"Extratos",v:"import"},{icon:"📜",label:"Histórico",v:"history"},{icon:"⚙️",label:"Configurações",v:"settings"}].map(b=>
+            React.createElement("button",{key:b.v,onClick:()=>setView(b.v),style:{display:"flex",alignItems:"center",gap:10,padding:"10px 14px",borderRadius:12,border:"none",background:view===b.v?"rgba(255,255,255,.2)":"transparent",color:"#fff",fontWeight:view===b.v?700:500,fontSize:14,cursor:"pointer",textAlign:"left"}},
+              React.createElement("span",{style:{fontSize:18}},b.icon),b.label
+            )
+          ),
+          React.createElement("div",{style:{flex:1}}),
+          // Botão câmera na sidebar
+          React.createElement("button",{onClick:()=>setView("capture"),style:{display:"flex",alignItems:"center",gap:10,padding:"12px 14px",borderRadius:12,border:"none",background:"rgba(255,255,255,.15)",color:"#fff",fontWeight:700,fontSize:14,cursor:"pointer"}},
+            React.createElement("span",{style:{fontSize:20}},"+"),
+            "Novo comprovante"
+          ),
+          React.createElement("button",{onClick:syncDown,disabled:syncing,style:{display:"flex",alignItems:"center",gap:8,padding:"10px 14px",borderRadius:12,border:"none",background:"transparent",color:"rgba(255,255,255,.6)",fontSize:13,cursor:"pointer"}},
+            syncing?React.createElement(Spinner,{size:14}):"🔄","Sincronizar"
+          )
+        ),
+        // Conteúdo principal
+        React.createElement("div",{style:{flex:1,padding:"24px",overflow:"auto"}},
+          React.createElement("div",{style:{display:"grid",gridTemplateColumns:"1fr 1fr",gap:24,maxWidth:1200}},
+            React.createElement("div",null,actionButtons),
+            React.createElement("div",null,recentsList)
+          )
+        )
+      )
+    );
+  }
+
+  // Layout mobile (original)
   return React.createElement(Wrap,null,
     toast&&React.createElement(Toast,{t:toast}),
     React.createElement("div",{style:{background:"linear-gradient(135deg,#1a3a2a,#2d5a3d)",padding:"28px 20px 36px",borderRadius:"0 0 32px 32px"}},
@@ -3261,54 +3377,8 @@ function App(){
       )
     ),
     React.createElement("div",{style:{padding:"16px 16px 0"}},
-      pendingUploads.length>0&&React.createElement("button",{onClick:()=>setView("upload"),className:"pulse",style:{width:"100%",padding:"16px 18px",borderRadius:18,border:"none",background:"linear-gradient(135deg,#f59e0b,#ea580c)",color:"#fff",fontWeight:700,fontSize:14,marginBottom:14,display:"flex",alignItems:"center",justifyContent:"space-between",boxShadow:"0 4px 16px rgba(234,88,12,.35)"}},
-        React.createElement("div",{style:{display:"flex",alignItems:"center",gap:10}},React.createElement("span",{style:{fontSize:24}},"📥"),React.createElement("div",{style:{textAlign:"left"}},React.createElement("div",{style:{fontSize:15}},`${pendingUploads.length} comprovante${pendingUploads.length>1?"s":""} para processar`),React.createElement("div",{style:{fontSize:11,opacity:.85}},"Processa todos automaticamente — você revisa depois"))),
-        React.createElement("span",{style:{fontSize:18}},"→")
-      ),
-
-      pendingImports>0&&React.createElement("button",{onClick:()=>setView("import"),style:{width:"100%",padding:"16px 18px",borderRadius:18,border:"none",background:"linear-gradient(135deg,#2563eb,#1e40af)",color:"#fff",fontWeight:700,fontSize:14,marginBottom:14,display:"flex",alignItems:"center",justifyContent:"space-between",boxShadow:"0 4px 16px rgba(37,99,235,.3)"}},
-        React.createElement("div",{style:{display:"flex",alignItems:"center",gap:10}},React.createElement("span",{style:{fontSize:24}},"💳"),React.createElement("div",{style:{textAlign:"left"}},React.createElement("div",{style:{fontSize:15}},`${pendingImports} importação${pendingImports>1?"ões":""} pendente${pendingImports>1?"s":""}`),React.createElement("div",{style:{fontSize:11,opacity:.85}},"Aguardando revisão"))),
-        React.createElement("span",{style:{fontSize:18}},"→")
-      ),
-
-      React.createElement("div",{style:{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:14}},
-        React.createElement("button",{onClick:()=>setView("dashboard"),style:{padding:"16px 14px",borderRadius:18,border:"none",background:"linear-gradient(135deg,#7c3aed,#5b21b6)",color:"#fff",fontWeight:700,boxShadow:"0 4px 16px rgba(124,58,237,.3)",cursor:"pointer",textAlign:"left"}},
-          React.createElement("div",{style:{fontSize:24,marginBottom:4}},"📊"),
-          React.createElement("div",{style:{fontSize:14}},"Dashboard"),
-          React.createElement("div",{style:{fontSize:10,opacity:.85,fontWeight:500}},"Análises completas")
-        ),
-        React.createElement("button",{onClick:()=>setView("import"),style:{padding:"16px 14px",borderRadius:18,border:"none",background:"linear-gradient(135deg,#0891b2,#0e7490)",color:"#fff",fontWeight:700,boxShadow:"0 4px 16px rgba(8,145,178,.3)",cursor:"pointer",textAlign:"left"}},
-          React.createElement("div",{style:{fontSize:24,marginBottom:4}},"💳"),
-          React.createElement("div",{style:{fontSize:14}},"Extratos"),
-          React.createElement("div",{style:{fontSize:10,opacity:.85,fontWeight:500}},"CSV Nubank e Bradesco")
-        )
-      ),
-      // Botão selecionar arquivos locais
-      React.createElement("label",{style:{display:"block",marginBottom:14,cursor:"pointer"}},
-        React.createElement("input",{type:"file",accept:"image/*,.pdf",multiple:true,style:{display:"none"},onChange:e=>{
-          const arr=Array.from(e.target.files||[]);
-          if(arr.length===0)return;
-          if(!apiKey){toast_("⚠️ Configure a chave da Anthropic em ⚙️ para usar IA","err");return;}
-          setLocalFiles(arr);setView("localfiles");
-          e.target.value=""; // reset input
-        }}),
-        React.createElement("div",{style:{width:"100%",padding:"14px 18px",borderRadius:18,border:"2px dashed #7c3aed",background:"#faf5ff",color:"#7c3aed",fontWeight:700,fontSize:14,display:"flex",alignItems:"center",gap:12,boxSizing:"border-box"}},
-          React.createElement("span",{style:{fontSize:24}},"📎"),
-          React.createElement("div",null,
-            React.createElement("div",null,"Selecionar comprovantes"),
-            React.createElement("div",{style:{fontSize:11,fontWeight:500,opacity:.8}},"JPG, PNG ou PDF · vários de uma vez")
-          )
-        )
-      ),
-
-      React.createElement("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}},
-        React.createElement("h3",{style:{margin:0,fontSize:15,fontWeight:700}},"Recentes"),
-        React.createElement("button",{onClick:()=>setView("history"),style:{background:"none",border:"none",color:"#2d5a3d",fontWeight:600,fontSize:13}},"Ver tudo →")
-      ),
-      React.createElement(Card,null,
-        expenses.length===0&&React.createElement("div",{style:{textAlign:"center",color:"#9ca3af",padding:20,fontSize:14}},"Nenhum gasto ainda"),
-        expenses.slice(0,8).map(e=>React.createElement(ExpRow,{key:e.id,e,cats,accounts}))
-      )
+      actionButtons,
+      recentsList
     ),
     React.createElement("div",{style:{position:"fixed",bottom:0,left:"50%",transform:"translateX(-50%)",width:"100%",maxWidth:430,background:"#fff",borderTop:"1px solid #e5e7eb",display:"flex",justifyContent:"space-around",alignItems:"center",padding:"8px 0 18px",zIndex:100}},
       [{icon:"🏠",label:"Início",v:"home"},{icon:"📊",label:"Dashboard",v:"dashboard"},{icon:"💳",label:"Importar",v:"import"},{icon:"⚙️",label:"Config",v:"settings"}].map(b=>
