@@ -46,10 +46,19 @@ function sb() {
 
 // ── MAPPERS ──────────────────────────────────────────────────────────
 
+// Normaliza data do Supabase (DATE pode vir como string ISO com timezone)
+const normSbDate=d=>{
+  if(!d)return "";
+  const s=String(d);
+  // Se vier como "2026-04-25" ou "2026-04-25T..." pega só YYYY-MM-DD
+  if(s.length>=10)return s.slice(0,10);
+  return s;
+};
+
 function dbToExp(r) {
   return {
     id: r.id,
-    date: r.date,
+    date: normSbDate(r.date),
     merchant: r.merchant || "",
     category: r.category || "",
     total: Number(r.total) || 0,
@@ -68,7 +77,7 @@ function dbToExp(r) {
 function expToDb(e) {
   return {
     id: e.id,
-    date: e.date,
+    date: normSbDate(e.date) || new Date().toISOString().slice(0,10),
     merchant: e.merchant || "",
     category: e.category || null,
     total: Number(e.total) || 0,
@@ -88,7 +97,7 @@ function dbToImp(r) {
   return {
     id: r.id,
     accountId: r.account_id || "",
-    date: r.date || "",
+    date: normSbDate(r.date),
     title: r.title || "",
     originalAmount: r.original_amount != null ? Number(r.original_amount) : null,
     totalAmount: Number(r.total_amount) || 0,
