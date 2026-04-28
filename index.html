@@ -138,7 +138,13 @@ async function sbGetAll() {
   (penRes.data || []).forEach(r => { matchPenalties[r.key] = r.penalty; });
 
   // categories: rows → app format [{n, i, c}]
-  const categories = (catRes.data || []).map(r => ({ n: r.name, i: r.emoji || "", c: "" }));
+  // Preenche cor ausente com cor da paleta baseada no índice
+  const PALETTE=["#16a34a","#65a30d","#0891b2","#2563eb","#7c3aed","#db2777","#dc2626","#ea580c","#d97706","#475569","#0f766e","#a16207","#9333ea","#0369a1","#be185d"];
+  const categories = (catRes.data || []).map((r,idx) => ({
+    n: r.name,
+    i: r.emoji || "📦",
+    c: r.color || PALETTE[idx % PALETTE.length]
+  }));
 
   return {
     ok: true,
@@ -363,7 +369,17 @@ async function sbDeletePayer(name) {
 async function sbAddCategory(cat) {
   const name = cat.n || cat.name;
   const emoji = cat.i || cat.emoji || "";
-  const { error } = await sb().from("categories").insert({ name, emoji });
+  const color = cat.c || "";
+  const { error } = await sb().from("categories").insert({ name, emoji, color });
+  if (error) throw new Error(error.message);
+  return { ok: true };
+}
+
+async function sbUpdateCategory(name, updates) {
+  const dbUp = {};
+  if (updates.c !== undefined) dbUp.color = updates.c;
+  if (updates.i !== undefined) dbUp.emoji = updates.i;
+  const { error } = await sb().from("categories").update(dbUp).eq("name", name);
   if (error) throw new Error(error.message);
   return { ok: true };
 }
@@ -3351,7 +3367,7 @@ function MigrationCard({cfg,toast_}){
   );
 }
 
-function SettingsView({payers,cfg,lmap,cats,apiKey,setApiKey,uploadFolderUrl,onAddPayer,onDeletePayer,onChangeUrl,onDeleteLearning,onAddCategory,onDeleteCategory,onResetData,onCleanupDuplicates,onFixPayers,onBack,toast_,onRefresh,syncing}){
+function SettingsView({payers,cfg,lmap,cats,setCats,apiKey,setApiKey,uploadFolderUrl,onAddPayer,onDeletePayer,onChangeUrl,onDeleteLearning,onAddCategory,onDeleteCategory,onResetData,onCleanupDuplicates,onFixPayers,onBack,toast_,onRefresh,syncing}){
   const [newPayer,setNewPayer]=useState("");const [url,setUrl]=useState(cfg.scriptUrl||"");
   const [keyInput,setKeyInput]=useState(apiKey||"");const [showKey,setShowKey]=useState(false);
   const [editingCategory,setEditingCategory]=useState(false);
@@ -3374,9 +3390,23 @@ function SettingsView({payers,cfg,lmap,cats,apiKey,setApiKey,uploadFolderUrl,onA
         React.createElement("button",{onClick:onRefresh,disabled:syncing,style:{width:"100%",padding:12,borderRadius:12,background:syncing?"#e5e7eb":"#1a3a2a",color:syncing?"#6b7280":"#fff",border:"none",fontWeight:700,fontSize:14}},syncing?"Sincronizando...":"🔄 Atualizar agora")
       ),
       React.createElement(Card,{title:`🏷️ Categorias (${cats.length})`},
-        React.createElement("div",{style:{maxHeight:280,overflowY:"auto",marginBottom:12}},cats.map(cat=>React.createElement("div",{key:cat.n,style:{display:"flex",alignItems:"center",gap:10,padding:"8px 0",borderBottom:"1px solid #f0ede6"}},
-          React.createElement("div",{style:{width:36,height:36,borderRadius:12,background:cat.c+"20",display:"flex",alignItems:"center",justifyContent:"center",fontSize:18}},cat.i),
+        React.createElement("div",{style:{maxHeight:320,overflowY:"auto",marginBottom:12}},cats.map(cat=>React.createElement("div",{key:cat.n,style:{display:"flex",alignItems:"center",gap:10,padding:"8px 0",borderBottom:"1px solid #f0ede6"}},
+          React.createElement("div",{style:{width:36,height:36,borderRadius:12,background:(cat.c||"#94a3b8")+"20",display:"flex",alignItems:"center",justifyContent:"center",fontSize:18}},cat.i||"📦"),
           React.createElement("div",{style:{flex:1,fontWeight:600,fontSize:13}},cat.n),
+          // Seletor de cor inline
+          React.createElement("div",{style:{position:"relative"}},
+            React.createElement("input",{
+              type:"color",
+              value:cat.c||"#94a3b8",
+              title:"Editar cor",
+              onChange:async(e)=>{
+                const newColor=e.target.value;
+                setCats(p=>p.map(c=>c.n===cat.n?{...c,c:newColor}:c));
+                try{await sbUpdateCategory(cat.n,{c:newColor});}catch{}
+              },
+              style:{width:28,height:28,borderRadius:8,border:"2px solid #e5e7eb",cursor:"pointer",padding:2,background:"none"}
+            })
+          ),
           React.createElement("button",{onClick:()=>{if(confirm(`Excluir "${cat.n}"?`))onDeleteCategory(cat.n);},style:{background:"none",border:"none",fontSize:16,padding:4}},"🗑️")
         ))),
         !editingCategory&&React.createElement("button",{onClick:()=>setEditingCategory(true),style:{width:"100%",padding:12,borderRadius:12,background:"#fff",border:"2px dashed #2d5a3d",color:"#1a3a2a",fontWeight:700,fontSize:14}},"+ Nova categoria"),
@@ -3832,7 +3862,7 @@ function App(){
   if(view==="editExpense"&&editingExpense)return React.createElement(React.Fragment,null,toastSlot,React.createElement(EditExpenseView,{expense:editingExpense,imports,accounts,payers,cats,matchPenalties,allExpenses:expenses,onSave:updateExpenseFn,onUnlink:unlinkExpenseFn,onLink:linkExpenseFn,onBulkUpdateCategory:bulkUpdateCategoryFn,onBulkUpdateSplit:bulkUpdateSplitFn,onBack:()=>{setEditingExpense(null);setView("history");},toast_}));
   if(view==="dashboard")return React.createElement(React.Fragment,null,toastSlot,React.createElement(DashboardView,{expenses,cats,payers,accounts,onBack:()=>setView("home")}));
   if(view==="import")return React.createElement(React.Fragment,null,toastSlot,React.createElement(ImportView,{accounts,imports,expenses,cats,payers,lmap,scriptUrl:cfg.scriptUrl,onAddAccount:addAccount,onDeleteAccount:deleteAccountFn,onUploadCsv:uploadCsv,onUpdateImport:updateImport,onDeleteImport:deleteImportFn,onDeleteExpense:deleteExpense,onLaunchImports:launchImports,onDeleteSession:deleteSessionFn,onBack:()=>setView("home"),toast_}));
-  if(view==="settings")return React.createElement(React.Fragment,null,toastSlot,React.createElement(SettingsView,{payers,cfg,lmap,cats,apiKey,setApiKey,uploadFolderUrl,onAddPayer:addPayer,onDeletePayer:deletePayer,onChangeUrl:changeUrl,onDeleteLearning:deleteLearning,onAddCategory:addCategory,onDeleteCategory:deleteCategory,onResetData:resetDataFn,onCleanupDuplicates:cleanupDuplicatesFn,onFixPayers:fixPayersFn,onBack:()=>setView("home"),toast_,onRefresh:syncDown,syncing}));
+  if(view==="settings")return React.createElement(React.Fragment,null,toastSlot,React.createElement(SettingsView,{payers,cfg,lmap,cats,setCats,apiKey,setApiKey,uploadFolderUrl,onAddPayer:addPayer,onDeletePayer:deletePayer,onChangeUrl:changeUrl,onDeleteLearning:deleteLearning,onAddCategory:addCategory,onDeleteCategory:deleteCategory,onResetData:resetDataFn,onCleanupDuplicates:cleanupDuplicatesFn,onFixPayers:fixPayersFn,onBack:()=>setView("home"),toast_,onRefresh:syncDown,syncing}));
 
   // HOME
   const now=new Date();
