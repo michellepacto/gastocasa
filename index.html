@@ -1298,6 +1298,13 @@ function ImportView({accounts,imports,expenses,cats,payers,lmap,scriptUrl,onAddA
   const [selectedIds,setSelectedIds]=useState(new Set());
   const [busy,setBusy]=useState(false);
   const [searchText,setSearchText]=useState("");
+  const [sortCol,setSortCol]=useState("date");
+  const [sortDir,setSortDir]=useState("desc");
+  const toggleSort=(col)=>{
+    if(sortCol===col)setSortDir(d=>d==="asc"?"desc":"asc");
+    else{setSortCol(col);setSortDir(col==="totalAmount"?"desc":"asc");}
+  };
+  const sortArrow=(col)=>sortCol===col?(sortDir==="asc"?"▲":"▼"):"⇅";
 
   // Detecta duplicatas dinamicamente
   const importsWithDup=useMemo(()=>{
@@ -1322,7 +1329,18 @@ function ImportView({accounts,imports,expenses,cats,payers,lmap,scriptUrl,onAddA
   }).filter(imp=>{
     if(!searchText.trim())return true;
     return normSearch(imp.title).includes(normSearch(searchText.trim()));
-  }).sort((a,b)=>(b.date||"").localeCompare(a.date||""));
+  }).sort((a,b)=>{
+    let av,bv;
+    if(sortCol==="date"){av=a.date||"";bv=b.date||"";}
+    else if(sortCol==="title"){av=(a.title||"").toLowerCase();bv=(b.title||"").toLowerCase();}
+    else if(sortCol==="account"){av=(a.accountId||"").toLowerCase();bv=(b.accountId||"").toLowerCase();}
+    else if(sortCol==="totalAmount"){av=Number(a.totalAmount)||0;bv=Number(b.totalAmount)||0;}
+    else if(sortCol==="status"){av=a.status||"";bv=b.status||"";}
+    else{av="";bv="";}
+    if(av<bv)return sortDir==="asc"?-1:1;
+    if(av>bv)return sortDir==="asc"?1:-1;
+    return 0;
+  });
 
   // Estatísticas
   const stats={
@@ -1470,12 +1488,12 @@ function ImportView({accounts,imports,expenses,cats,payers,lmap,scriptUrl,onAddA
                 React.createElement("th",{style:{padding:"10px 8px",textAlign:"left",width:30}},
                   filterStatus==="pendente"&&React.createElement("input",{type:"checkbox",checked:allSelected,onChange:toggleAll})
                 ),
-                React.createElement("th",{style:{padding:"10px 8px",textAlign:"left",width:90}},"Status"),
-                React.createElement("th",{style:{padding:"10px 8px",textAlign:"left",width:90}},"Data"),
-                React.createElement("th",{style:{padding:"10px 8px",textAlign:"left",width:140}},"Conta"),
-                React.createElement("th",{style:{padding:"10px 8px",textAlign:"left"}},"Estabelecimento"),
+                React.createElement("th",{style:{padding:"10px 8px",textAlign:"left",width:90,cursor:"pointer",userSelect:"none"},onClick:()=>toggleSort("status")},"Status "+sortArrow("status")),
+                React.createElement("th",{style:{padding:"10px 8px",textAlign:"left",width:90,cursor:"pointer",userSelect:"none"},onClick:()=>toggleSort("date")},"Data "+sortArrow("date")),
+                React.createElement("th",{style:{padding:"10px 8px",textAlign:"left",width:140,cursor:"pointer",userSelect:"none"},onClick:()=>toggleSort("account")},"Conta "+sortArrow("account")),
+                React.createElement("th",{style:{padding:"10px 8px",textAlign:"left",cursor:"pointer",userSelect:"none"},onClick:()=>toggleSort("title")},"Estabelecimento "+sortArrow("title")),
                 React.createElement("th",{style:{padding:"10px 8px",textAlign:"left",width:160}},"Categoria"),
-                React.createElement("th",{style:{padding:"10px 8px",textAlign:"right",width:100}},"Valor"),
+                React.createElement("th",{style:{padding:"10px 8px",textAlign:"right",width:100,cursor:"pointer",userSelect:"none"},onClick:()=>toggleSort("totalAmount")},"Valor "+sortArrow("totalAmount")),
                 React.createElement("th",{style:{padding:"10px 8px",textAlign:"center",width:200}},"Ações")
               )
             ),
